@@ -2,11 +2,12 @@ import streamlit as st
 from supabase import create_client
 from dotenv import load_dotenv
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import os
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 
-# Cargar variables de entorno
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -72,22 +73,47 @@ def sincronizar(df, supabase):
         supabase.table("gastos").insert(lote).execute()
     return len(registros_str)
 
-def get_gastos_mes(supabase, year, month):
+@st.cache_data(ttl=300)
+def get_todos_gastos(_supabase):
+    todos = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = _supabase.table("gastos")\
+            .select("fecha_gasto, categoria_consumo, consumo, monto, tipo")\
+            .range(offset, offset + page_size - 1)\
+            .execute()
+        if not result.data:
+            break
+        todos.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    if not todos:
+        return pd.DataFrame()
+    df = pd.DataFrame(todos)
+    df["fecha_gasto"] = pd.to_datetime(df["fecha_gasto"])
+    df["importe"] = df.apply(
+        lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
+    )
+    df["anio"] = df["fecha_gasto"].dt.year
+    df["mes"] = df["fecha_gasto"].dt.month
+    df["mes_anio"] = df["fecha_gasto"].dt.to_period("M")
+    return df
+
+def get_gastos_mes(_supabase, year, month):
     inicio = date(year, month, 1)
-    if month == 12:
-        fin = date(year + 1, 1, 1)
-    else:
-        fin = date(year, month + 1, 1)
-    result = supabase.table("gastos")\
+    fin = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    result = _supabase.table("gastos")\
         .select("categoria_consumo, monto, tipo")\
         .gte("fecha_gasto", str(inicio))\
         .lt("fecha_gasto", str(fin))\
         .execute()
     return pd.DataFrame(result.data) if result.data else pd.DataFrame()
 
-def get_presupuestos_mes(supabase, year, month):
+def get_presupuestos_mes(_supabase, year, month):
     inicio = date(year, month, 1)
-    result = supabase.table("presupuestos")\
+    result = _supabase.table("presupuestos")\
         .select("categoria_consumo, monto")\
         .eq("fecha", str(inicio))\
         .execute()
@@ -95,8 +121,6 @@ def get_presupuestos_mes(supabase, year, month):
 
 def pagina_dashboard(supabase):
     st.title("💰 Money Magnet")
-
-    # Navegación de mes
     hoy = date.today()
     if "mes_offset" not in st.session_state:
         st.session_state.mes_offset = 0
@@ -105,7 +129,7 @@ def pagina_dashboard(supabase):
     year, month = mes_actual.year, mes_actual.month
     nombre_mes = mes_actual.strftime("%B %Y").capitalize()
 
-    col_izq, col_centro, col_der = st.columns([1, 2, 1])
+    col_izq, col_centro, col_der, col_hoy = st.columns([1, 2, 1, 1])
     with col_izq:
         if st.button("◀ Mes anterior"):
             st.session_state.mes_offset -= 1
@@ -117,8 +141,12 @@ def pagina_dashboard(supabase):
         if st.button("Mes siguiente ▶"):
             st.session_state.mes_offset += 1
             st.rerun()
+    with col_hoy:
+        if st.session_state.mes_offset != 0:
+            if st.button("🏠 Hoy"):
+                st.session_state.mes_offset = 0
+                st.rerun()
 
-    # Cargar datos
     with st.spinner("Cargando datos..."):
         df_gastos = get_gastos_mes(supabase, year, month)
         df_presupuestos = get_presupuestos_mes(supabase, year, month)
@@ -127,7 +155,6 @@ def pagina_dashboard(supabase):
         st.warning("No hay datos para este mes.")
         return
 
-    # Calcular KPIs
     if not df_gastos.empty:
         df_gastos["importe"] = df_gastos.apply(
             lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
@@ -140,7 +167,6 @@ def pagina_dashboard(supabase):
 
     presupuesto_total = df_presupuestos["monto"].sum() if not df_presupuestos.empty else 0
 
-    # Tarjetas KPI
     st.divider()
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("💸 Total Gastado", f"€{total_gastado:,.2f}")
@@ -148,13 +174,10 @@ def pagina_dashboard(supabase):
     k3.metric("⚖️ Balance", f"€{balance:,.2f}")
     k4.metric("🎯 Presupuesto Neto", f"€{presupuesto_total:,.2f}")
 
-    # Tabla por categoría
     st.divider()
     st.subheader("📊 Detalle por Categoría")
-
     ocultar_cero = st.toggle("Ocultar categorías sin presupuesto (€0)", value=False)
 
-    # Construir tabla combinada
     if not df_gastos.empty:
         real_cat = df_gastos.groupby("categoria_consumo")["importe"].sum().reset_index()
         real_cat.columns = ["categoria_consumo", "real"]
@@ -162,8 +185,7 @@ def pagina_dashboard(supabase):
         real_cat = pd.DataFrame(columns=["categoria_consumo", "real"])
 
     if not df_presupuestos.empty:
-        df_tabla = pd.merge(df_presupuestos, real_cat,
-                            on="categoria_consumo", how="left")
+        df_tabla = pd.merge(df_presupuestos, real_cat, on="categoria_consumo", how="left")
         df_tabla["real"] = df_tabla["real"].fillna(0)
     else:
         df_tabla = real_cat.copy()
@@ -172,7 +194,6 @@ def pagina_dashboard(supabase):
     df_tabla.columns = ["Categoría", "Presupuesto", "Real"]
     df_tabla["Diferencia"] = df_tabla["Real"] - df_tabla["Presupuesto"]
 
-    # Semáforo
     def semaforo(row):
         if row["Real"] == 0 and row["Presupuesto"] != 0:
             return "🟡"
@@ -184,24 +205,187 @@ def pagina_dashboard(supabase):
             return "🟢"
 
     df_tabla["Estado"] = df_tabla.apply(semaforo, axis=1)
-
-    # Filtro categorías €0
     if ocultar_cero:
         df_tabla = df_tabla[df_tabla["Presupuesto"] != 0]
+    df_tabla = df_tabla.reindex(df_tabla["Real"].abs().sort_values(ascending=False).index)
 
-    # Ordenar por importe real descendente (mayor gasto arriba)
-    df_tabla = df_tabla.reindex(
-        df_tabla["Real"].abs().sort_values(ascending=False).index
-    )
-
-    # Formatear montos
     df_mostrar = df_tabla.copy()
-    df_mostrar["Presupuesto"] = df_mostrar["Presupuesto"].apply(
-        lambda x: f"€{x:,.2f}")
+    df_mostrar["Presupuesto"] = df_mostrar["Presupuesto"].apply(lambda x: f"€{x:,.2f}")
     df_mostrar["Real"] = df_mostrar["Real"].apply(lambda x: f"€{x:,.2f}")
-    df_mostrar["Diferencia"] = df_mostrar["Diferencia"].apply(
-        lambda x: f"€{x:,.2f}")
+    df_mostrar["Diferencia"] = df_mostrar["Diferencia"].apply(lambda x: f"€{x:,.2f}")
+    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
+def pagina_historico(supabase):
+    st.title("📈 Histórico")
+
+    with st.spinner("Cargando datos históricos..."):
+        df = get_todos_gastos(supabase)
+
+    if df.empty:
+        st.warning("No hay datos disponibles.")
+        return
+
+    anios_disponibles = sorted(df["anio"].unique(), reverse=True)
+
+    # --- Sección 1: Ingresos vs Gastos por mes ---
+    st.subheader("📊 Ingresos vs Gastos por Mes")
+    anio_sel = st.selectbox("Año", anios_disponibles, index=0, key="anio_barras")
+
+    df_anio = df[df["anio"] == anio_sel].copy()
+    meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+
+    df_barras = df_anio.groupby(["mes", "tipo"])["monto"].sum().reset_index()
+    df_barras["mes_nombre"] = df_barras["mes"].map(meses_nombres)
+    df_barras = df_barras.sort_values("mes")
+
+    fig_barras = px.bar(
+        df_barras,
+        x="mes_nombre",
+        y="monto",
+        color="tipo",
+        barmode="group",
+        color_discrete_map={"Ingreso": "#82c9a0", "Gasto": "#e8968a"},
+        labels={"monto": "€", "mes_nombre": "Mes", "tipo": ""},
+        title=f"Ingresos vs Gastos — {anio_sel}"
+    )
+    fig_barras.update_layout(legend_title_text="")
+    st.plotly_chart(fig_barras, use_container_width=True)
+
+    st.divider()
+
+    # --- Sección 2: Balance ---
+    st.subheader("📈 Balance")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        vista_balance = st.radio(
+            "Vista",
+            ["Cascada mensual", "Balance mensual", "Balance acumulado"],
+            horizontal=True
+        )
+    anios_rango = sorted(df["anio"].unique())
+    with col2:
+        anio_desde = st.selectbox("Desde año", anios_rango,
+                                   index=0, key="desde_anio")
+    with col3:
+        anio_hasta = st.selectbox("Hasta año", anios_rango,
+                                   index=len(anios_rango)-1, key="hasta_anio")
+
+    df_rango = df[
+        (df["anio"] >= anio_desde) &
+        (df["anio"] <= anio_hasta)
+    ].copy()
+
+    # Agrupar por mes
+    df_bal = df_rango.groupby("mes_anio")["importe"].sum().reset_index()
+    df_bal = df_bal.sort_values("mes_anio")
+    df_bal["etiqueta"] = df_bal["mes_anio"].astype(str)
+    df_bal["acumulado"] = df_bal["importe"].cumsum()
+
+    if vista_balance == "Cascada mensual":
+        # Waterfall chart
+        colores = ["#82c9a0" if v >= 0 else "#e8968a" for v in df_bal["importe"]]
+        medidas = ["relative"] * len(df_bal)
+
+        fig = go.Figure(go.Waterfall(
+            name="Balance",
+            orientation="v",
+            measure=medidas,
+            x=df_bal["etiqueta"],
+            y=df_bal["importe"],
+            connector={"line": {"color": "rgba(150,150,150,0.3)"}},
+            increasing={"marker": {"color": "#82c9a0"}},
+            decreasing={"marker": {"color": "#e8968a"}},
+            totals={"marker": {"color": "#3498db"}},
+            hovertemplate="%{x}<br>Δ mes: €%{y:,.2f}<br>Acumulado: €%{base:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(
+            title="Cascada de balance mensual",
+            xaxis_title="Mes",
+            yaxis_title="€",
+            showlegend=False
+        )
+
+    elif vista_balance == "Balance mensual":
+        fig = go.Figure(go.Bar(
+            x=df_bal["etiqueta"],
+            y=df_bal["importe"],
+            marker_color=["#82c9a0" if v >= 0 else "#e8968a" for v in df_bal["importe"]],
+            hovertemplate="%{x}<br>Balance: €%{y:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(
+            title="Balance neto por mes",
+            xaxis_title="Mes",
+            yaxis_title="€",
+            showlegend=False
+        )
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+    else:
+        fig = go.Figure(go.Scatter(
+            x=df_bal["etiqueta"],
+            y=df_bal["acumulado"],
+            mode="lines+markers",
+            line=dict(color="#3498db", width=2.5),
+            marker=dict(size=6),
+            hovertemplate="%{x}<br>Acumulado: €%{y:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(
+            title="Balance acumulado",
+            xaxis_title="Mes",
+            yaxis_title="€",
+            showlegend=False
+        )
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+def pagina_detalle(supabase):
+    st.title("🔍 Detalle de Transacciones")
+
+    with st.spinner("Cargando datos..."):
+        df = get_todos_gastos(supabase)
+
+    if df.empty:
+        st.warning("No hay datos disponibles.")
+        return
+
+    anios_disponibles = sorted(df["anio"].unique(), reverse=True)
+    meses_nombres = {0:"Todos",1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",
+                     5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",
+                     9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
+    categorias = ["Todas"] + sorted(df["categoria_consumo"].unique().tolist())
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        anio_sel = st.selectbox("Año", ["Todos"] + [str(a) for a in anios_disponibles])
+    with col2:
+        mes_sel = st.selectbox("Mes", list(meses_nombres.values()))
+    with col3:
+        cat_sel = st.selectbox("Categoría", categorias)
+
+    df_filtrado = df.copy()
+    if anio_sel != "Todos":
+        df_filtrado = df_filtrado[df_filtrado["anio"] == int(anio_sel)]
+    if mes_sel != "Todos":
+        mes_num = [k for k, v in meses_nombres.items() if v == mes_sel][0]
+        df_filtrado = df_filtrado[df_filtrado["mes"] == mes_num]
+    if cat_sel != "Todas":
+        df_filtrado = df_filtrado[df_filtrado["categoria_consumo"] == cat_sel]
+
+    df_filtrado = df_filtrado.sort_values("fecha_gasto", ascending=False)
+
+    col_r1, col_r2 = st.columns(2)
+    col_r1.metric("📋 Registros", f"{len(df_filtrado):,}")
+    col_r2.metric("💰 Balance filtrado", f"€{df_filtrado['importe'].sum():,.2f}")
+
+    df_mostrar = df_filtrado[[
+        "fecha_gasto", "categoria_consumo", "consumo", "monto", "tipo"
+    ]].copy()
+    df_mostrar.columns = ["Fecha", "Categoría", "Consumo", "Monto (€)", "Tipo"]
+    df_mostrar["Fecha"] = df_mostrar["Fecha"].dt.strftime("%d/%m/%Y")
+    df_mostrar["Monto (€)"] = df_mostrar["Monto (€)"].apply(lambda x: f"€{x:,.2f}")
     st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
 def pagina_sync(supabase):
@@ -234,6 +418,7 @@ def pagina_sync(supabase):
                         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"],
                         axis=1
                     ).sum()
+                st.cache_data.clear()
                 st.success(f"""
                 ✅ **Sincronización completada**
                 - 📊 **{total:,} registros** subidos a Supabase
@@ -247,16 +432,18 @@ def pagina_sync(supabase):
 
 def main():
     supabase = init_supabase()
-
     st.sidebar.title("📱 Navegación")
     pagina = st.sidebar.radio(
         "Ir a:",
-        ["📊 Dashboard", "📤 Sincronizar"],
+        ["📊 Dashboard", "📈 Histórico", "🔍 Detalle", "📤 Sincronizar"],
         index=0
     )
-
     if pagina == "📊 Dashboard":
         pagina_dashboard(supabase)
+    elif pagina == "📈 Histórico":
+        pagina_historico(supabase)
+    elif pagina == "🔍 Detalle":
+        pagina_detalle(supabase)
     elif pagina == "📤 Sincronizar":
         pagina_sync(supabase)
 

@@ -3,3 +3,4 @@ supabase
 pandas
 openpyxl
 python-dotenv
+python-dateutil

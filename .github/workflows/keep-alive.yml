@@ -9,5 +9,9 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase
-        run: curl https://mkqymfnsommkvsppokmy.supabase.co
+      - name: Query Supabase
+        run: |
+          curl -s \
+            -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
+            "https://mkqymfnsommkvsppokmy.supabase.co/rest/v1/gastos?select=id&limit=1"

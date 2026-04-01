@@ -6,12 +6,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  ping:
+  ping_supabase:
     runs-on: ubuntu-latest
     steps:
-      - name: Query Supabase
+      - name: Consulta de Actividad a Supabase
         run: |
-          curl -s \
-            -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}" \
-            "https://mkqymfnsommkvsppokmy.supabase.co/rest/v1/gastos?select=id&limit=1"
+          curl -v -X GET "https://mkqymfnsommkvsppokmy.supabase.co/rest/v1/gastos?select=id&limit=1" \
+          -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}"

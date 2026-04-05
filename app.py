@@ -607,6 +607,203 @@ def pagina_sync(supabase):
     if st.session_state.get("mostrar_saldos_post_sync", False):
         widget_saldos_inline(supabase)
 
+def pagina_proyeccion(supabase):
+    st.title("🔮 Proyección Anual 2026")
+
+    # --- Datos reales 2026 ---
+    with st.spinner("Calculando proyección..."):
+
+        # Saldo inicial = balance acumulado hasta dic 2025
+        todos_hist = []
+        offset = 0
+        while True:
+            result = supabase.table("gastos")\
+                .select("monto, tipo, fecha_gasto")\
+                .lt("fecha_gasto", "2026-01-01")\
+                .range(offset, offset + 999)\
+                .execute()
+            if not result.data:
+                break
+            todos_hist.extend(result.data)
+            if len(result.data) < 1000:
+                break
+            offset += 1000
+
+        saldo_inicial = 0
+        if todos_hist:
+            df_hist = pd.DataFrame(todos_hist)
+            saldo_inicial = df_hist.apply(
+                lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
+            ).sum()
+
+        # Datos reales 2026
+        result_real = supabase.table("gastos")\
+            .select("fecha_gasto, monto, tipo")\
+            .gte("fecha_gasto", "2026-01-01")\
+            .lte("fecha_gasto", "2026-12-31")\
+            .execute()
+
+        # Presupuestos 2026
+        result_presup = supabase.table("presupuestos")\
+            .select("fecha, monto")\
+            .gte("fecha", "2026-01-01")\
+            .lte("fecha", "2026-12-31")\
+            .execute()
+
+    # Procesar reales
+    meses = list(range(1, 13))
+    meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+
+    balance_real_mes = {m: None for m in meses}
+    if result_real.data:
+        df_real = pd.DataFrame(result_real.data)
+        df_real["fecha_gasto"] = pd.to_datetime(df_real["fecha_gasto"])
+        df_real["mes"] = df_real["fecha_gasto"].dt.month
+        df_real["importe"] = df_real.apply(
+            lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
+        )
+        for mes, grupo in df_real.groupby("mes"):
+            balance_real_mes[mes] = grupo["importe"].sum()
+
+    # Procesar presupuestos
+    balance_presup_mes = {m: 0 for m in meses}
+    if result_presup.data:
+        df_presup = pd.DataFrame(result_presup.data)
+        df_presup["fecha"] = pd.to_datetime(df_presup["fecha"])
+        df_presup["mes"] = df_presup["fecha"].dt.month
+        for mes, grupo in df_presup.groupby("mes"):
+            balance_presup_mes[mes] = grupo["monto"].sum()
+
+    # Construir tabla mes a mes
+    filas = []
+    saldo_real = saldo_inicial
+    saldo_teorico = saldo_inicial
+    mes_actual = date.today().month
+
+    for mes in meses:
+        es_real = balance_real_mes[mes] is not None
+        balance_r = balance_real_mes[mes] if es_real else None
+        balance_p = balance_presup_mes[mes]
+
+        if es_real:
+            saldo_real += balance_r
+            saldo_real_final = saldo_real
+        else:
+            saldo_real_final = None
+
+        saldo_teorico += balance_p
+        saldo_teorico_final = saldo_teorico
+
+        filas.append({
+            "Mes": meses_nombres[mes],
+            "Balance Real": balance_r,
+            "Saldo Real": saldo_real_final,
+            "Presupuesto": balance_p,
+            "Saldo Teórico": saldo_teorico_final,
+            "es_real": es_real,
+            "mes_num": mes
+        })
+
+    df_tabla = pd.DataFrame(filas)
+
+    # --- KPIs ---
+    saldo_actual = df_tabla[df_tabla["Saldo Real"].notna()]["Saldo Real"].iloc[-1]
+    saldo_dic = df_tabla[df_tabla["mes_num"] == 12]["Saldo Teórico"].iloc[0]
+    diferencia = saldo_dic - saldo_actual
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("💰 Saldo actual", f"€{saldo_actual:,.2f}")
+    k2.metric("🔮 Proyección diciembre", f"€{saldo_dic:,.2f}")
+    k3.metric("📈 Diferencia", f"€{diferencia:,.2f}")
+
+    st.divider()
+
+    # --- Gráfico ---
+    fig = go.Figure()
+
+    # Línea real
+    df_real_plot = df_tabla[df_tabla["Saldo Real"].notna()]
+    fig.add_trace(go.Scatter(
+        x=df_real_plot["Mes"],
+        y=df_real_plot["Saldo Real"],
+        mode="lines+markers",
+        name="Saldo Real",
+        line=dict(color="#3498db", width=2.5),
+        marker=dict(size=8),
+        hovertemplate="%{x}<br>Saldo Real: €%{y:,.2f}<extra></extra>"
+    ))
+
+    # Línea teórica (todos los meses)
+    fig.add_trace(go.Scatter(
+        x=df_tabla["Mes"],
+        y=df_tabla["Saldo Teórico"],
+        mode="lines+markers",
+        name="Saldo Teórico",
+        line=dict(color="#95a5a6", width=2, dash="dot"),
+        marker=dict(size=6),
+        hovertemplate="%{x}<br>Saldo Teórico: €%{y:,.2f}<extra></extra>"
+    ))
+
+# Marcador "Hoy" como forma vertical
+    mes_corte = meses_nombres[mes_actual]
+    fig.add_shape(
+        type="line",
+        x0=mes_corte, x1=mes_corte,
+        y0=0, y1=1,
+        xref="x", yref="paper",
+        line=dict(color="orange", width=2, dash="dash")
+    )
+    fig.add_annotation(
+        x=mes_corte, y=1,
+        xref="x", yref="paper",
+        text="▲ Hoy",
+        showarrow=False,
+        font=dict(color="orange", size=12),
+        yanchor="bottom"
+    )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3)
+
+    fig.update_layout(
+        title="Proyección de Saldo 2026",
+        xaxis_title="Mes",
+        yaxis_title="€",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # --- Tabla ---
+    st.subheader("📋 Detalle mes a mes")
+
+    df_mostrar = df_tabla.copy()
+    df_mostrar["Balance Real"] = df_mostrar["Balance Real"].apply(
+        lambda x: f"€{x:,.2f}" if x is not None else "—"
+    )
+    df_mostrar["Saldo Real"] = df_mostrar["Saldo Real"].apply(
+        lambda x: f"€{x:,.2f}" if x is not None else "—"
+    )
+    df_mostrar["Presupuesto"] = df_mostrar["Presupuesto"].apply(
+        lambda x: f"€{x:,.2f}"
+    )
+    df_mostrar["Saldo Teórico"] = df_mostrar["Saldo Teórico"].apply(
+        lambda x: f"€{x:,.2f}"
+    )
+    df_mostrar[""] = df_mostrar["es_real"].apply(
+        lambda x: "✅ Real" if x else "🔮 Proyectado"
+    )
+
+    st.dataframe(
+        df_mostrar[["Mes", "Balance Real", "Saldo Real",
+                    "Presupuesto", "Saldo Teórico", ""]],
+        use_container_width=True,
+        hide_index=True
+    )
+
 def main():
     supabase = init_supabase()
 
@@ -614,7 +811,7 @@ def main():
     pagina = st.sidebar.radio(
         "Ir a:",
         ["📊 Dashboard", "📈 Histórico", "🔍 Detalle",
-         "💳 Bancos", "📤 Sincronizar"],
+         "💳 Bancos", "🔮 Proyección", "📤 Sincronizar"],
         index=0
     )
 
@@ -641,6 +838,8 @@ def main():
         pagina_detalle(supabase)
     elif pagina == "💳 Bancos":
         pagina_bancos(supabase)
+    elif pagina == "🔮 Proyección":
+        pagina_proyeccion(supabase)
     elif pagina == "📤 Sincronizar":
         pagina_sync(supabase)
 

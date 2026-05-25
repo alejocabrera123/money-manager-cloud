@@ -12,26 +12,49 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-APP_PASSWORD = os.getenv("APP_PASSWORD")
 
 @st.cache_resource
 def init_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if not st.session_state.authenticated:
-        st.title("💰 Money Magnet")
-        password = st.text_input("Contraseña", type="password")
-        if st.button("Entrar"):
-            if password == APP_PASSWORD:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("❌ Contraseña incorrecta")
-        return False
-    return True
+def get_supabase_auth():
+    """Devuelve cliente Supabase con token del usuario autenticado."""
+    client = init_supabase()
+    if "access_token" in st.session_state and st.session_state.access_token:
+        client.postgrest.auth(st.session_state.access_token)
+    return client
+
+def login_page():
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "access_token" not in st.session_state:
+        st.session_state.access_token = None
+
+    if st.session_state.user:
+        return True
+
+    st.title("💰 Money Magnet")
+    st.subheader("Iniciar sesión")
+
+    email = st.text_input("Email")
+    password = st.text_input("Contraseña", type="password")
+
+    if st.button("Entrar", type="primary"):
+        try:
+            supabase = init_supabase()
+            response = supabase.auth.sign_in_with_password(
+                credentials={"email": email, "password": password}
+            )
+            st.session_state.user = response.user
+            st.session_state.access_token = response.session.access_token
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+
+    return False
+
+def get_user_id():
+    return st.session_state.user.id
 
 def procesar_xlsx(archivo):
     df = pd.read_excel(archivo)
@@ -60,13 +83,14 @@ def procesar_xlsx(archivo):
     df = df.fillna("")
     return df
 
-def sincronizar(df, supabase):
-    supabase.table("gastos").delete().neq("id", 0).execute()
+def sincronizar(df, supabase, user_id):
+    supabase.table("gastos").delete().eq("user_id", user_id).execute()
     registros = df.to_dict(orient="records")
     registros_str = []
     for r in registros:
         r["fecha_gasto"] = str(r["fecha_gasto"])
         r["monto"] = float(r["monto"])
+        r["user_id"] = user_id
         registros_str.append(r)
     for i in range(0, len(registros_str), 500):
         lote = registros_str[i:i + 500]
@@ -74,13 +98,14 @@ def sincronizar(df, supabase):
     return len(registros_str)
 
 @st.cache_data(ttl=300)
-def get_todos_gastos(_supabase):
+def get_todos_gastos(_supabase, user_id):
     todos = []
     page_size = 1000
     offset = 0
     while True:
         result = _supabase.table("gastos")\
             .select("fecha_gasto, categoria_consumo, consumo, monto, tipo")\
+            .eq("user_id", user_id)\
             .range(offset, offset + page_size - 1)\
             .execute()
         if not result.data:
@@ -101,30 +126,33 @@ def get_todos_gastos(_supabase):
     df["mes_anio"] = df["fecha_gasto"].dt.to_period("M")
     return df
 
-def get_gastos_mes(_supabase, year, month):
+def get_gastos_mes(supabase, year, month, user_id):
     inicio = date(year, month, 1)
     fin = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-    result = _supabase.table("gastos")\
+    result = supabase.table("gastos")\
         .select("categoria_consumo, monto, tipo")\
+        .eq("user_id", user_id)\
         .gte("fecha_gasto", str(inicio))\
         .lt("fecha_gasto", str(fin))\
         .execute()
     return pd.DataFrame(result.data) if result.data else pd.DataFrame()
 
-def get_presupuestos_mes(_supabase, year, month):
+def get_presupuestos_mes(supabase, year, month, user_id):
     inicio = date(year, month, 1)
-    result = _supabase.table("presupuestos")\
+    result = supabase.table("presupuestos")\
         .select("categoria_consumo, monto")\
+        .eq("user_id", user_id)\
         .eq("fecha", str(inicio))\
         .execute()
     return pd.DataFrame(result.data) if result.data else pd.DataFrame()
 
-def get_balance_app(_supabase):
+def get_balance_app(supabase, user_id):
     todos = []
     offset = 0
     while True:
-        result = _supabase.table("gastos")\
+        result = supabase.table("gastos")\
             .select("monto, tipo")\
+            .eq("user_id", user_id)\
             .range(offset, offset + 999)\
             .execute()
         if not result.data:
@@ -140,9 +168,10 @@ def get_balance_app(_supabase):
         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
     ).sum()
 
-def get_saldos_actuales(_supabase):
-    result = _supabase.table("saldos_bancarios")\
+def get_saldos_actuales(supabase, user_id):
+    result = supabase.table("saldos_bancarios")\
         .select("banco, monto, fecha_registro")\
+        .eq("user_id", user_id)\
         .order("fecha_registro", desc=True)\
         .execute()
     if not result.data:
@@ -152,45 +181,18 @@ def get_saldos_actuales(_supabase):
     df_actual = df[df["fecha_registro"] == ultima_fecha][["banco", "monto"]].copy()
     return df_actual, ultima_fecha
 
-def guardar_saldos(_supabase, saldos_dict):
+def guardar_saldos(supabase, saldos_dict, user_id):
     hoy = str(date.today())
     registros = [
-        {"banco": banco, "monto": float(monto), "fecha_registro": hoy}
+        {"banco": banco, "monto": float(monto), "fecha_registro": hoy, "user_id": user_id}
         for banco, monto in saldos_dict.items()
         if banco.strip()
     ]
     if registros:
-        _supabase.table("saldos_bancarios").insert(registros).execute()
+        supabase.table("saldos_bancarios").insert(registros).execute()
 
-def barra_estado(supabase):
-    balance_app = get_balance_app(supabase)
-    df_saldos, ultima_fecha = get_saldos_actuales(supabase)
-
-    if df_saldos.empty:
-        st.info("💳 Sin saldos bancarios registrados — ve a la página **Bancos** para añadirlos")
-        return
-
-    total_bancos = df_saldos["monto"].sum()
-    diferencia = abs(balance_app - total_bancos)
-    fecha_str = ultima_fecha if ultima_fecha else "—"
-
-    if diferencia <= 0.01:
-        st.success(
-            f"✅ **Data cuadrada** — "
-            f"Saldos: {fecha_str} | "
-            f"Bancos: €{total_bancos:,.2f} | "
-            f"App: €{balance_app:,.2f}"
-        )
-    else:
-        st.warning(
-            f"⚠️ **Revisá tus saldos** — "
-            f"App: €{balance_app:,.2f} | "
-            f"Bancos: €{total_bancos:,.2f} | "
-            f"Diferencia: €{diferencia:,.2f}"
-        )
-
-def widget_saldos_inline(supabase):
-    df_saldos, ultima_fecha = get_saldos_actuales(supabase)
+def widget_saldos_inline(supabase, user_id):
+    df_saldos, ultima_fecha = get_saldos_actuales(supabase, user_id)
 
     st.divider()
     st.subheader("💳 ¿Actualizás tus saldos bancarios?")
@@ -227,13 +229,13 @@ def widget_saldos_inline(supabase):
             st.rerun()
     with col_si:
         if st.button("💾 Guardar saldos", type="primary", key="sync_si"):
-            guardar_saldos(supabase, st.session_state.saldos_temp)
+            guardar_saldos(supabase, st.session_state.saldos_temp, user_id)
             st.session_state.mostrar_saldos_post_sync = False
             st.session_state.pop("saldos_temp", None)
             st.success("✅ Saldos guardados correctamente")
             st.rerun()
 
-def pagina_dashboard(supabase):
+def pagina_dashboard(supabase, user_id):
     st.title("💰 Money Magnet")
 
     hoy = date.today()
@@ -263,8 +265,8 @@ def pagina_dashboard(supabase):
                 st.rerun()
 
     with st.spinner("Cargando datos..."):
-        df_gastos = get_gastos_mes(supabase, year, month)
-        df_presupuestos = get_presupuestos_mes(supabase, year, month)
+        df_gastos = get_gastos_mes(supabase, year, month, user_id)
+        df_presupuestos = get_presupuestos_mes(supabase, year, month, user_id)
 
     if df_gastos.empty and df_presupuestos.empty:
         st.warning("No hay datos para este mes.")
@@ -330,13 +332,12 @@ def pagina_dashboard(supabase):
     df_mostrar["Diferencia"] = df_mostrar["Diferencia"].apply(lambda x: f"€{x:,.2f}")
     st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
-def pagina_bancos(supabase):
+def pagina_bancos(supabase, user_id):
     st.title("💳 Saldos Bancarios")
 
-    balance_app = get_balance_app(supabase)
-    df_saldos, ultima_fecha = get_saldos_actuales(supabase)
+    balance_app = get_balance_app(supabase, user_id)
+    df_saldos, ultima_fecha = get_saldos_actuales(supabase, user_id)
 
-    # Inicializar estado editable
     if "saldos_edit" not in st.session_state:
         if not df_saldos.empty:
             st.session_state.saldos_edit = dict(
@@ -349,12 +350,9 @@ def pagina_bancos(supabase):
         st.caption(f"Últimos saldos guardados: {ultima_fecha}")
 
     st.divider()
-
-    # Balance de referencia
     st.markdown(f"📱 **Balance Money Magnet:** €{balance_app:,.2f}")
     st.divider()
 
-    # Tabla editable
     bancos = list(st.session_state.saldos_edit.keys())
     for banco in bancos:
         col1, col2, col3 = st.columns([3, 2, 1])
@@ -376,7 +374,6 @@ def pagina_bancos(supabase):
 
     st.divider()
 
-    # Agregar banco nuevo
     with st.expander("➕ Agregar banco"):
         nuevo_banco = st.text_input("Nombre del banco", key="nuevo_banco_nombre")
         nuevo_monto_banco = st.number_input("Monto (€)", value=0.0, step=0.01,
@@ -386,7 +383,6 @@ def pagina_bancos(supabase):
                 st.session_state.saldos_edit[nuevo_banco.strip()] = nuevo_monto_banco
                 st.rerun()
 
-    # Totales y diferencia
     total_bancos = sum(st.session_state.saldos_edit.values())
     diferencia = balance_app - total_bancos
 
@@ -400,16 +396,16 @@ def pagina_bancos(supabase):
 
     st.divider()
     if st.button("💾 Guardar saldos", type="primary"):
-        guardar_saldos(supabase, st.session_state.saldos_edit)
+        guardar_saldos(supabase, st.session_state.saldos_edit, user_id)
         st.session_state.pop("saldos_edit", None)
         st.success("✅ Saldos guardados correctamente")
         st.rerun()
 
-    # Historial
     st.divider()
     with st.expander("📋 Ver historial de saldos"):
         result = supabase.table("saldos_bancarios")\
             .select("banco, monto, fecha_registro")\
+            .eq("user_id", user_id)\
             .order("fecha_registro", desc=True)\
             .execute()
         if result.data:
@@ -423,11 +419,11 @@ def pagina_bancos(supabase):
         else:
             st.info("Sin historial disponible")
 
-def pagina_historico(supabase):
+def pagina_historico(supabase, user_id):
     st.title("📈 Histórico")
 
     with st.spinner("Cargando datos históricos..."):
-        df = get_todos_gastos(supabase)
+        df = get_todos_gastos(supabase, user_id)
 
     if df.empty:
         st.warning("No hay datos disponibles.")
@@ -511,11 +507,11 @@ def pagina_historico(supabase):
 
     st.plotly_chart(fig, use_container_width=True)
 
-def pagina_detalle(supabase):
+def pagina_detalle(supabase, user_id):
     st.title("🔍 Detalle de Transacciones")
 
     with st.spinner("Cargando datos..."):
-        df = get_todos_gastos(supabase)
+        df = get_todos_gastos(supabase, user_id)
 
     if df.empty:
         st.warning("No hay datos disponibles.")
@@ -557,7 +553,7 @@ def pagina_detalle(supabase):
     df_mostrar["Monto (€)"] = df_mostrar["Monto (€)"].apply(lambda x: f"€{x:,.2f}")
     st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
-def pagina_sync(supabase):
+def pagina_sync(supabase, user_id):
     st.title("💰 Money Magnet")
     st.caption("Gestión de finanzas personales")
     st.divider()
@@ -583,7 +579,7 @@ def pagina_sync(supabase):
             st.divider()
             if st.button("🔄 Sincronizar con Supabase", type="primary"):
                 with st.spinner("Sincronizando..."):
-                    total = sincronizar(df, supabase)
+                    total = sincronizar(df, supabase, user_id)
                     balance = df.apply(
                         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"],
                         axis=1
@@ -603,22 +599,20 @@ def pagina_sync(supabase):
         except Exception as e:
             st.error(f"❌ Error al sincronizar: {e}")
 
-    # Pop-up post-sync
     if st.session_state.get("mostrar_saldos_post_sync", False):
-        widget_saldos_inline(supabase)
+        widget_saldos_inline(supabase, user_id)
 
-def pagina_proyeccion(supabase):
+def pagina_proyeccion(supabase, user_id):
     st.title("🔮 Proyección Anual 2026")
 
-    # --- Datos reales 2026 ---
     with st.spinner("Calculando proyección..."):
 
-        # Saldo inicial = balance acumulado hasta dic 2025
         todos_hist = []
         offset = 0
         while True:
             result = supabase.table("gastos")\
                 .select("monto, tipo, fecha_gasto")\
+                .eq("user_id", user_id)\
                 .lt("fecha_gasto", "2026-01-01")\
                 .range(offset, offset + 999)\
                 .execute()
@@ -636,21 +630,20 @@ def pagina_proyeccion(supabase):
                 lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
             ).sum()
 
-        # Datos reales 2026
         result_real = supabase.table("gastos")\
             .select("fecha_gasto, monto, tipo")\
+            .eq("user_id", user_id)\
             .gte("fecha_gasto", "2026-01-01")\
             .lte("fecha_gasto", "2026-12-31")\
             .execute()
 
-        # Presupuestos 2026
         result_presup = supabase.table("presupuestos")\
             .select("fecha, monto")\
+            .eq("user_id", user_id)\
             .gte("fecha", "2026-01-01")\
             .lte("fecha", "2026-12-31")\
             .execute()
 
-    # Procesar reales
     meses = list(range(1, 13))
     meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
                      7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
@@ -666,7 +659,6 @@ def pagina_proyeccion(supabase):
         for mes, grupo in df_real.groupby("mes"):
             balance_real_mes[mes] = grupo["importe"].sum()
 
-    # Procesar presupuestos
     balance_presup_mes = {m: 0 for m in meses}
     if result_presup.data:
         df_presup = pd.DataFrame(result_presup.data)
@@ -675,7 +667,6 @@ def pagina_proyeccion(supabase):
         for mes, grupo in df_presup.groupby("mes"):
             balance_presup_mes[mes] = grupo["monto"].sum()
 
-    # Construir tabla mes a mes
     filas = []
     saldo_real = saldo_inicial
     saldo_teorico = saldo_inicial
@@ -707,7 +698,6 @@ def pagina_proyeccion(supabase):
 
     df_tabla = pd.DataFrame(filas)
 
-    # --- KPIs ---
     saldo_actual = df_tabla[df_tabla["Saldo Real"].notna()]["Saldo Real"].iloc[-1]
     saldo_dic = df_tabla[df_tabla["mes_num"] == 12]["Saldo Teórico"].iloc[0]
     diferencia = saldo_dic - saldo_actual
@@ -719,10 +709,8 @@ def pagina_proyeccion(supabase):
 
     st.divider()
 
-    # --- Gráfico ---
     fig = go.Figure()
 
-    # Línea real
     df_real_plot = df_tabla[df_tabla["Saldo Real"].notna()]
     fig.add_trace(go.Scatter(
         x=df_real_plot["Mes"],
@@ -734,7 +722,6 @@ def pagina_proyeccion(supabase):
         hovertemplate="%{x}<br>Saldo Real: €%{y:,.2f}<extra></extra>"
     ))
 
-    # Línea teórica (todos los meses)
     fig.add_trace(go.Scatter(
         x=df_tabla["Mes"],
         y=df_tabla["Saldo Teórico"],
@@ -745,7 +732,6 @@ def pagina_proyeccion(supabase):
         hovertemplate="%{x}<br>Saldo Teórico: €%{y:,.2f}<extra></extra>"
     ))
 
-# Marcador "Hoy" como forma vertical
     mes_corte = meses_nombres[mes_actual]
     fig.add_shape(
         type="line",
@@ -776,8 +762,6 @@ def pagina_proyeccion(supabase):
     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
-
-    # --- Tabla ---
     st.subheader("📋 Detalle mes a mes")
 
     df_mostrar = df_tabla.copy()
@@ -805,9 +789,19 @@ def pagina_proyeccion(supabase):
     )
 
 def main():
-    supabase = init_supabase()
+    if not login_page():
+        return
+
+    user_id = get_user_id()
+    supabase = get_supabase_auth()
 
     st.sidebar.title("📱 Navegación")
+
+    if st.sidebar.button("🚪 Cerrar sesión"):
+        st.session_state.user = None
+        st.session_state.access_token = None
+        st.rerun()
+
     pagina = st.sidebar.radio(
         "Ir a:",
         ["📊 Dashboard", "📈 Histórico", "🔍 Detalle",
@@ -815,10 +809,9 @@ def main():
         index=0
     )
 
-    # Barra de estado en sidebar
     st.sidebar.divider()
-    balance_app = get_balance_app(supabase)
-    df_saldos, ultima_fecha = get_saldos_actuales(supabase)
+    balance_app = get_balance_app(supabase, user_id)
+    df_saldos, ultima_fecha = get_saldos_actuales(supabase, user_id)
 
     if df_saldos.empty:
         st.sidebar.info("💳 Sin saldos registrados")
@@ -831,18 +824,17 @@ def main():
             st.sidebar.warning(f"⚠️ Revisar saldos\n\nDif: €{diferencia:,.2f}")
 
     if pagina == "📊 Dashboard":
-        pagina_dashboard(supabase)
+        pagina_dashboard(supabase, user_id)
     elif pagina == "📈 Histórico":
-        pagina_historico(supabase)
+        pagina_historico(supabase, user_id)
     elif pagina == "🔍 Detalle":
-        pagina_detalle(supabase)
+        pagina_detalle(supabase, user_id)
     elif pagina == "💳 Bancos":
-        pagina_bancos(supabase)
+        pagina_bancos(supabase, user_id)
     elif pagina == "🔮 Proyección":
-        pagina_proyeccion(supabase)
+        pagina_proyeccion(supabase, user_id)
     elif pagina == "📤 Sincronizar":
-        pagina_sync(supabase)
+        pagina_sync(supabase, user_id)
 
 if __name__ == "__main__":
-    if check_password():
-        main()
+    main()

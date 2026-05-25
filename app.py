@@ -80,7 +80,10 @@ def procesar_xlsx(archivo):
              "sub_categoria", "consumo", "monto", "tipo", "descripcion"]]
     df["tipo"] = df["tipo"].replace("Gastos", "Gasto")
     df["fecha_gasto"] = pd.to_datetime(df["fecha_gasto"]).dt.date
-    df = df.fillna("")
+    # FIX 6: fillna solo en columnas texto, no en todo el DataFrame
+    df["sub_categoria"] = df["sub_categoria"].fillna("")
+    df["consumo"] = df["consumo"].fillna("")
+    df["descripcion"] = df["descripcion"].fillna("")
     return df
 
 def sincronizar(df, supabase, user_id):
@@ -97,6 +100,7 @@ def sincronizar(df, supabase, user_id):
         supabase.table("gastos").insert(lote).execute()
     return len(registros_str)
 
+# ─── FIX 1+2: bug paginación corregido (eliminado if len < page_size) ────────
 @st.cache_data(ttl=300)
 def get_todos_gastos(_supabase, user_id):
     todos = []
@@ -111,9 +115,7 @@ def get_todos_gastos(_supabase, user_id):
         if not result.data:
             break
         todos.extend(result.data)
-        if len(result.data) < page_size:
-            break
-        offset += page_size
+        offset += page_size  # ← solo avanza; el break lo controla "if not result.data"
     if not todos:
         return pd.DataFrame()
     df = pd.DataFrame(todos)
@@ -146,11 +148,15 @@ def get_presupuestos_mes(supabase, year, month, user_id):
         .execute()
     return pd.DataFrame(result.data) if result.data else pd.DataFrame()
 
-def get_balance_app(supabase, user_id):
+# ─── FIX 1+2: bug paginación corregido + cache añadido ───────────────────────
+# Nota: parámetro renombrado a _supabase (prefijo _) para que st.cache_data
+# no intente serializarlo — igual que en get_todos_gastos
+@st.cache_data(ttl=300)
+def get_balance_app(_supabase, user_id):
     todos = []
     offset = 0
     while True:
-        result = supabase.table("gastos")\
+        result = _supabase.table("gastos")\
             .select("monto, tipo")\
             .eq("user_id", user_id)\
             .range(offset, offset + 999)\
@@ -158,18 +164,20 @@ def get_balance_app(supabase, user_id):
         if not result.data:
             break
         todos.extend(result.data)
-        if len(result.data) < 1000:
-            break
-        offset += 1000
+        offset += 1000  # ← solo avanza; el break lo controla "if not result.data"
     if not todos:
         return 0
     df = pd.DataFrame(todos)
-    return df.apply(
+    df["importe"] = df.apply(
         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
-    ).sum()
+    )
+    return df["importe"].sum()
 
-def get_saldos_actuales(supabase, user_id):
-    result = supabase.table("saldos_bancarios")\
+# ─── FIX 2: cache añadido ─────────────────────────────────────────────────────
+# Nota: parámetro renombrado a _supabase por el mismo motivo
+@st.cache_data(ttl=300)
+def get_saldos_actuales(_supabase, user_id):
+    result = _supabase.table("saldos_bancarios")\
         .select("banco, monto, fecha_registro")\
         .eq("user_id", user_id)\
         .order("fecha_registro", desc=True)\
@@ -230,6 +238,8 @@ def widget_saldos_inline(supabase, user_id):
     with col_si:
         if st.button("💾 Guardar saldos", type="primary", key="sync_si"):
             guardar_saldos(supabase, st.session_state.saldos_temp, user_id)
+            # FIX 3: invalidación quirúrgica — solo saldos
+            get_saldos_actuales.clear()
             st.session_state.mostrar_saldos_post_sync = False
             st.session_state.pop("saldos_temp", None)
             st.success("✅ Saldos guardados correctamente")
@@ -397,6 +407,8 @@ def pagina_bancos(supabase, user_id):
     st.divider()
     if st.button("💾 Guardar saldos", type="primary"):
         guardar_saldos(supabase, st.session_state.saldos_edit, user_id)
+        # FIX 3: invalidación quirúrgica — solo saldos
+        get_saldos_actuales.clear()
         st.session_state.pop("saldos_edit", None)
         st.success("✅ Saldos guardados correctamente")
         st.rerun()
@@ -584,7 +596,9 @@ def pagina_sync(supabase, user_id):
                         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"],
                         axis=1
                     ).sum()
-                st.cache_data.clear()
+                # FIX 3: invalidación quirúrgica — solo lo que cambió, no cache global
+                get_todos_gastos.clear()
+                get_balance_app.clear()
                 st.session_state.mostrar_saldos_post_sync = True
                 st.session_state.pop("saldos_temp", None)
                 st.success(f"""
@@ -619,9 +633,7 @@ def pagina_proyeccion(supabase, user_id):
             if not result.data:
                 break
             todos_hist.extend(result.data)
-            if len(result.data) < 1000:
-                break
-            offset += 1000
+            offset += 1000  # ← FIX 1: bug paginación corregido también aquí
 
         saldo_inicial = 0
         if todos_hist:

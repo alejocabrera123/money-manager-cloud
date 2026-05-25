@@ -530,40 +530,55 @@ def pagina_detalle(supabase, user_id):
         return
 
     anios_disponibles = sorted(df["anio"].unique(), reverse=True)
+    anio_default_idx = (
+        anios_disponibles.index(date.today().year)
+        if date.today().year in anios_disponibles else 0
+    )
+
     meses_nombres = {0:"Todos",1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",
                      5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",
                      9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
-    categorias = ["Todas"] + sorted(df["categoria_consumo"].unique().tolist())
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        anio_sel = st.selectbox("Año", ["Todos"] + [str(a) for a in anios_disponibles])
+        anio_sel = st.selectbox("Año", anios_disponibles, index=anio_default_idx)
     with col2:
         mes_sel = st.selectbox("Mes", list(meses_nombres.values()))
-    with col3:
-        cat_sel = st.selectbox("Categoría", categorias)
 
-    df_filtrado = df.copy()
-    if anio_sel != "Todos":
-        df_filtrado = df_filtrado[df_filtrado["anio"] == int(anio_sel)]
+    # Filtrado — categoría ya no hace falta, la tabla lo muestra todo
+    df_filtrado = df[df["anio"] == anio_sel].copy()
     if mes_sel != "Todos":
         mes_num = [k for k, v in meses_nombres.items() if v == mes_sel][0]
         df_filtrado = df_filtrado[df_filtrado["mes"] == mes_num]
-    if cat_sel != "Todas":
-        df_filtrado = df_filtrado[df_filtrado["categoria_consumo"] == cat_sel]
-
-    df_filtrado = df_filtrado.sort_values("fecha_gasto", ascending=False)
 
     col_r1, col_r2 = st.columns(2)
     col_r1.metric("📋 Registros", f"{len(df_filtrado):,}")
     col_r2.metric("💰 Balance filtrado", f"€{df_filtrado['importe'].sum():,.2f}")
 
-    df_mostrar = df_filtrado[["fecha_gasto", "categoria_consumo", "consumo",
-                               "monto", "tipo"]].copy()
-    df_mostrar.columns = ["Fecha", "Categoría", "Consumo", "Monto (€)", "Tipo"]
-    df_mostrar["Fecha"] = df_mostrar["Fecha"].dt.strftime("%d/%m/%Y")
-    df_mostrar["Monto (€)"] = df_mostrar["Monto (€)"].apply(lambda x: f"€{x:,.2f}")
-    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+    st.divider()
+
+    # ── Pivot: filas = categoría, columnas = meses con datos ─────────────────
+    meses_col = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                 7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+    meses_presentes = sorted(df_filtrado["mes"].unique())
+
+    pivot = df_filtrado.groupby(["categoria_consumo", "mes"])["importe"].sum().unstack(level="mes")
+    pivot.columns = [meses_col[m] for m in pivot.columns]
+    pivot["Total"] = pivot.sum(axis=1)
+    pivot = pivot.sort_values("Total")  # gastos mayores arriba (más negativos primero)
+
+    # Formatear: 0 y NaN → vacío, resto → €X,XX
+    def fmt(x):
+        if pd.isna(x) or x == 0:
+            return ""
+        return f"€{x:,.2f}"
+
+    pivot_fmt = pivot.applymap(fmt)
+    pivot_fmt.index.name = "Categoría"
+    pivot_fmt = pivot_fmt.reset_index()
+
+    altura = (len(pivot_fmt) + 1) * 35 + 10
+    st.dataframe(pivot_fmt, use_container_width=True, hide_index=True, height=altura)
 
 def pagina_sync(supabase, user_id):
     st.title("💰 Money Magnet")
@@ -617,23 +632,27 @@ def pagina_sync(supabase, user_id):
         widget_saldos_inline(supabase, user_id)
 
 def pagina_proyeccion(supabase, user_id):
-    st.title("🔮 Proyección Anual 2026")
+    anio = date.today().year
+    fecha_inicio = f"{anio}-01-01"
+    fecha_fin = f"{anio}-12-31"
+
+    st.title(f"🔮 Proyección Anual {anio}")
 
     with st.spinner("Calculando proyección..."):
-
+        
         todos_hist = []
         offset = 0
         while True:
             result = supabase.table("gastos")\
                 .select("monto, tipo, fecha_gasto")\
                 .eq("user_id", user_id)\
-                .lt("fecha_gasto", "2026-01-01")\
+                .lt("fecha_gasto", fecha_inicio)\
                 .range(offset, offset + 999)\
                 .execute()
             if not result.data:
                 break
             todos_hist.extend(result.data)
-            offset += 1000  # ← FIX 1: bug paginación corregido también aquí
+            offset += 1000
 
         saldo_inicial = 0
         if todos_hist:
@@ -645,15 +664,15 @@ def pagina_proyeccion(supabase, user_id):
         result_real = supabase.table("gastos")\
             .select("fecha_gasto, monto, tipo")\
             .eq("user_id", user_id)\
-            .gte("fecha_gasto", "2026-01-01")\
-            .lte("fecha_gasto", "2026-12-31")\
+            .gte("fecha_gasto", fecha_inicio)\
+            .lte("fecha_gasto", fecha_fin)\
             .execute()
 
         result_presup = supabase.table("presupuestos")\
             .select("fecha, monto")\
             .eq("user_id", user_id)\
-            .gte("fecha", "2026-01-01")\
-            .lte("fecha", "2026-12-31")\
+            .gte("fecha", fecha_inicio)\
+            .lte("fecha", fecha_fin)\
             .execute()
 
     meses = list(range(1, 13))
@@ -764,7 +783,7 @@ def pagina_proyeccion(supabase, user_id):
     fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3)
 
     fig.update_layout(
-        title="Proyección de Saldo 2026",
+        title=f"Proyección de Saldo {anio}",
         xaxis_title="Mes",
         yaxis_title="€",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),

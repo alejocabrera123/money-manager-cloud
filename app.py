@@ -245,6 +245,12 @@ def widget_saldos_inline(supabase, user_id):
             st.success("✅ Saldos guardados correctamente")
             st.rerun()
 
+CATEGORIAS_OTROS = [
+    "Education", "Other", "Impuesto Bancario", "Clothing",
+    "Gifts", "Technology", "Payment", "Medical", "Tramites",
+    "Visa", "Hacienda"
+]
+
 def pagina_dashboard(supabase, user_id):
     st.title("💰 Money Magnet")
 
@@ -332,15 +338,41 @@ def pagina_dashboard(supabase, user_id):
             return "🟢"
 
     df_tabla["Estado"] = df_tabla.apply(semaforo, axis=1)
-    if ocultar_cero:
-        df_tabla = df_tabla[df_tabla["Presupuesto"] != 0]
-    df_tabla = df_tabla.reindex(df_tabla["Real"].abs().sort_values(ascending=False).index)
 
-    df_mostrar = df_tabla.copy()
+    # ── Separar "Otros" del resto ─────────────────────────────────────────────
+    mask_otros = df_tabla["Categoría"].isin(CATEGORIAS_OTROS)
+    df_principales = df_tabla[~mask_otros].copy()
+    df_otros = df_tabla[mask_otros].copy()
+
+    if ocultar_cero:
+        df_principales = df_principales[df_principales["Presupuesto"] != 0]
+
+    df_principales = df_principales.reindex(
+        df_principales["Real"].abs().sort_values(ascending=False).index
+    )
+
+    # Fila agrupada "Otras Categorías"
+    if not df_otros.empty:
+        fila_otros = pd.DataFrame([{
+            "Categoría": "Otras Categorías ℹ️",
+            "Presupuesto": df_otros["Presupuesto"].sum(),
+            "Real": df_otros["Real"].sum(),
+            "Diferencia": df_otros["Diferencia"].sum(),
+            "Estado": "—"
+        }])
+        df_final = pd.concat([df_principales, fila_otros], ignore_index=True)
+    else:
+        df_final = df_principales
+
+    df_mostrar = df_final.copy()
     df_mostrar["Presupuesto"] = df_mostrar["Presupuesto"].apply(lambda x: f"€{x:,.2f}")
     df_mostrar["Real"] = df_mostrar["Real"].apply(lambda x: f"€{x:,.2f}")
     df_mostrar["Diferencia"] = df_mostrar["Diferencia"].apply(lambda x: f"€{x:,.2f}")
     st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+
+    if not df_otros.empty:
+        cats_lista = ", ".join(sorted(df_otros["Categoría"].tolist()))
+        st.caption(f"ℹ️ Otras Categorías incluye: {cats_lista}")
 
 def pagina_bancos(supabase, user_id):
     st.title("💳 Saldos Bancarios")

@@ -616,7 +616,9 @@ def pagina_sync(supabase, user_id):
     st.title("💰 Money Magnet")
     st.caption("Gestión de finanzas personales")
     st.divider()
-    st.subheader("📤 Sincronizar Datos")
+
+    # ── Sección 1: Sincronizar gastos desde xlsx ──────────────────────────────
+    st.subheader("📤 Sincronizar Gastos")
     st.write("Subí el archivo exportado desde Money Manager para actualizar tus datos.")
 
     archivo = st.file_uploader(
@@ -643,7 +645,6 @@ def pagina_sync(supabase, user_id):
                         lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"],
                         axis=1
                     ).sum()
-                # FIX 3: invalidación quirúrgica — solo lo que cambió, no cache global
                 get_todos_gastos.clear()
                 get_balance_app.clear()
                 st.session_state.mostrar_saldos_post_sync = True
@@ -662,6 +663,67 @@ def pagina_sync(supabase, user_id):
 
     if st.session_state.get("mostrar_saldos_post_sync", False):
         widget_saldos_inline(supabase, user_id)
+
+    # ── Sección 2: Cargar presupuestos desde CSV ──────────────────────────────
+    st.divider()
+    st.subheader("🎯 Cargar Presupuestos")
+    st.write("Subí un CSV con el presupuesto mensual para cargarlo en Supabase.")
+    st.caption("Formato requerido: columnas `categoria_consumo`, `fecha` (YYYY-MM-01), `monto`")
+
+    csv_file = st.file_uploader(
+        "Seleccioná tu archivo CSV",
+        type=["csv"],
+        help="Una fila por categoría. Ingresos positivos, gastos negativos.",
+        key="csv_presupuesto"
+    )
+
+    if csv_file:
+        try:
+            df_csv = pd.read_csv(csv_file)
+
+            # Validar columnas
+            columnas_req = ["categoria_consumo", "fecha", "monto"]
+            faltantes = [c for c in columnas_req if c not in df_csv.columns]
+            if faltantes:
+                st.error(f"❌ Columnas faltantes: {faltantes}")
+                return
+
+            # Limpiar y validar
+            df_csv["fecha"] = pd.to_datetime(df_csv["fecha"]).dt.strftime("%Y-%m-%d")
+            df_csv["monto"] = pd.to_numeric(df_csv["monto"], errors="coerce")
+            df_csv = df_csv.dropna(subset=["monto"])
+            df_csv["categoria_consumo"] = df_csv["categoria_consumo"].str.strip()
+
+            # Preview
+            mes_detectado = df_csv["fecha"].iloc[0][:7]  # YYYY-MM
+            st.success(f"✅ CSV cargado: **{len(df_csv)} categorías** para **{mes_detectado}**")
+            df_preview = df_csv.copy()
+            df_preview["monto"] = df_preview["monto"].apply(lambda x: f"€{x:,.2f}")
+            st.dataframe(df_preview, use_container_width=True, hide_index=True)
+
+            st.divider()
+            if st.button("💾 Cargar presupuesto en Supabase", type="primary", key="btn_presupuesto"):
+                with st.spinner("Cargando presupuesto..."):
+                    registros = df_csv.to_dict(orient="records")
+                    ok = 0
+                    errores = 0
+                    for r in registros:
+                        try:
+                            supabase.table("presupuestos").upsert({
+                                "categoria_consumo": r["categoria_consumo"],
+                                "fecha": r["fecha"],
+                                "monto": float(r["monto"]),
+                                "user_id": user_id
+                            }, on_conflict="categoria_consumo,fecha,user_id").execute()
+                            ok += 1
+                        except Exception:
+                            errores += 1
+
+                st.success(f"✅ **{ok} categorías** cargadas correctamente" +
+                           (f" — ⚠️ {errores} errores" if errores > 0 else ""))
+
+        except Exception as e:
+            st.error(f"❌ Error al procesar el CSV: {e}")
 
 def pagina_proyeccion(supabase, user_id):
     anio = date.today().year

@@ -605,7 +605,7 @@ def pagina_detalle(supabase, user_id):
             return ""
         return f"€{x:,.2f}"
 
-    pivot_fmt = pivot.applymap(fmt)
+    pivot_fmt = pivot.map(fmt)
     pivot_fmt.index.name = "Categoría"
     pivot_fmt = pivot_fmt.reset_index()
 

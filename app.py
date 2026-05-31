@@ -7,7 +7,9 @@ import plotly.graph_objects as go
 import os
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
+import openpyxl
 import re
+import yfinance as yf
 
 load_dotenv()
 
@@ -941,18 +943,6 @@ def pagina_proyeccion(supabase, user_id):
         hide_index=True
     )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SPRINT 8 — CARTERA v1
-# Instrucciones de integración en app.py:
-#
-# 1. Añadir las funciones de este archivo a app.py (antes de main())
-# 2. En main(), añadir "💼 Cartera" al st.sidebar.radio()
-# 3. En main(), añadir el elif correspondiente: pagina_cartera(supabase, user_id)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-import re  # ya importado en app.py? no — AÑADIR al bloque de imports de app.py
-
-
 # ── Helpers de parseo del xlsx ────────────────────────────────────────────────
 
 def _extraer_nombre_xlsx(val):
@@ -988,9 +978,6 @@ def procesar_xlsx_cartera(archivo):
       - df_transacciones: DataFrame con columnas para tabla `cartera`
       - df_tickers: DataFrame con columnas para tabla `cartera_tickers`
     """
-    import openpyxl
-    from datetime import datetime
-
     wb = openpyxl.load_workbook(archivo)
 
     if "INV Esp" not in wb.sheetnames:
@@ -1208,49 +1195,184 @@ def widget_asignar_sector(supabase, user_id):
                     st.success(f"✅ {ticker} → {seleccion}")
                     st.rerun()
 
+# ── NUEVA: conversión de formato de ticker ────────────────────────────────────
+# nueva funcion Sprint 9: convertir_ticker_yfinance - conversión de formato de ticker
+
+def convertir_ticker_yfinance(ticker_original):
+    """
+    Convierte el ticker del xlsx al formato que acepta yfinance.
+ 
+    Reglas:
+      LON:XXX  → XXX.L      (ETFs listados en Londres con prefijo explícito)
+      BRK.B    → BRK-B      (Berkshire: yfinance usa guión)
+      GLDV, CSPX, IGLN → XXX.L  (ETFs europeos sin prefijo, cotizan en Londres)
+      Cash / Efectivo → None  (ignorar, no es un ticker)
+      Resto → sin cambio     (NYSE/NASDAQ estándar)
+    """
+    if not ticker_original:
+        return None
+    t = str(ticker_original).strip()
+    if t.lower() in ("cash", "efectivo", ""):
+        return None
+    if t.upper().startswith("LON:"):
+        return t[4:].upper() + ".L"
+    if t.upper() == "BRK.B":
+        return "BRK-B"
+    ETFS_LONDON = {"GLDV", "CSPX", "IGLN"}
+    if t.upper() in ETFS_LONDON:
+        return t.upper() + ".L"
+    return t
+
+# nueva funcion Sprint 9: get_precios_yfinance - obtener precios en tiempo real
+def get_precios_yfinance(tickers_originales):
+    """
+    Recibe lista de tickers en formato xlsx (ej: ["LON:DFNS", "AAPL", "BRK.B"]).
+    Devuelve dos dicts:
+      precios  → {ticker_original: precio_float}   para los que funcionaron
+      errores  → {ticker_original: mensaje_str}    para los que fallaron
+ 
+    Nunca lanza excepción — siempre devuelve algo.
+    El llamador decide qué hacer con los errores.
+    """
+ 
+    precios = {}
+    errores = {}
+ 
+    # Primero intentamos descargar todos en una sola llamada (más eficiente)
+    mapa = {}  # ticker_yf → ticker_original
+    for t_orig in tickers_originales:
+        t_yf = convertir_ticker_yfinance(t_orig)
+        if t_yf:
+            mapa[t_yf] = t_orig
+ 
+    if not mapa:
+        return precios, errores
+ 
+    try:
+        # download() descarga todos en paralelo — más rápido que un loop
+        tickers_yf = list(mapa.keys())
+        data = yf.download(
+            tickers=tickers_yf,
+            period="1d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+ 
+        # Extraer el último precio de cierre para cada ticker
+        if not data.empty:
+            close = data["Close"] if "Close" in data.columns else data
+            for t_yf, t_orig in mapa.items():
+                try:
+                    if len(tickers_yf) == 1:
+                        # Con un solo ticker yfinance devuelve Series, no DataFrame
+                        serie = close
+                    else:
+                        serie = close[t_yf]
+                    serie_limpia = serie.dropna()
+                    if not serie_limpia.empty:
+                        precio = float(serie_limpia.iloc[-1])
+                        precios[t_orig] = round(precio, 4)
+                    else:
+                        errores[t_orig] = "Sin datos de precio"
+                except Exception as e:
+                    errores[t_orig] = f"Ticker no reconocido: {t_yf}"
+        else:
+            # data vacío → fallo global
+            for t_orig in mapa.values():
+                errores[t_orig] = "Sin datos (posible fallo de conexión)"
+ 
+    except Exception as e:
+        # Fallo total de yfinance (sin red, Yahoo caído, etc.)
+        msg = "yfinance no disponible"
+        for t_orig in mapa.values():
+            errores[t_orig] = msg
+ 
+    return precios, errores
+# ----------------------------------------------------------------------------------
+
 
 # ── Página principal ──────────────────────────────────────────────────────────
 
 def pagina_cartera(supabase, user_id):
     st.title("💼 Cartera de Inversiones")
-
-    # Detectar tickers sin sector antes de cargar datos
+ 
     widget_asignar_sector(supabase, user_id)
-
+ 
     with st.spinner("Cargando cartera..."):
         df = get_cartera(supabase, user_id)
-
+ 
     if df.empty:
         st.info("No hay datos de cartera. Sube tu xlsx en 📤 Sincronizar.")
         return
-
-    # ── KPIs globales ─────────────────────────────────────────────────────────
-    # Posición neta por ticker: Compras - Ventas
-    df_compras = df[df["tipo"] == "Compra"]
-    df_ventas = df[df["tipo"] == "Venta"]
-
+ 
+    # ── Obtener precios en tiempo real ────────────────────────────────────────
+    tickers_unicos = [
+        t for t in df["ticker"].unique()
+        if str(t).strip().lower() not in ("cash", "efectivo", "")
+    ]
+ 
+    with st.spinner("Consultando precios en tiempo real..."):
+        precios_rt, errores_rt = get_precios_yfinance(tickers_unicos)
+ 
+    # Banner de estado de yfinance
+    ahora = datetime.now().strftime("%H:%M")
+    n_ok = len(precios_rt)
+    n_err = len(errores_rt)
+ 
+    if n_ok == len(tickers_unicos):
+        st.success(f"🟢 Precios en tiempo real · Actualizado {ahora}")
+    elif n_ok == 0:
+        # Comprobar si es fallo global o todos individuales
+        es_fallo_global = errores_rt and "yfinance no disponible" in list(errores_rt.values())[0]
+        if es_fallo_global:
+            st.warning("🔴 yfinance no disponible · Usando precios del xlsx")
+        else:
+            st.warning(f"🔴 Sin precios en tiempo real · Usando precios del xlsx")
+    else:
+        st.warning(
+            f"⚠️ {n_ok}/{len(tickers_unicos)} tickers con precio en tiempo real · "
+            f"Actualizado {ahora}"
+        )
+ 
+    # ── KPIs globales — usando precios RT donde estén disponibles ─────────────
+    # Recalcular posicion_actual con precios RT para los KPIs
+    df_kpi = df.copy()
+ 
+    def precio_rt_o_xlsx(row):
+        if row["ticker"] in precios_rt:
+            return precios_rt[row["ticker"]]
+        return row["precio_actual"]
+ 
+    df_kpi["precio_final"] = df_kpi.apply(precio_rt_o_xlsx, axis=1)
+    df_kpi["posicion_actual_rt"] = df_kpi["cantidad"] * df_kpi["precio_final"]
+    df_kpi["gp_rt"] = df_kpi["posicion_actual_rt"] - df_kpi["posicion_inicial"]
+ 
+    df_compras = df_kpi[df_kpi["tipo"] == "Compra"]
+    df_ventas  = df_kpi[df_kpi["tipo"] == "Venta"]
+ 
     total_invertido = df_compras["posicion_inicial"].sum() - df_ventas["posicion_inicial"].sum()
-    total_actual = df_compras["posicion_actual"].sum() - df_ventas["posicion_actual"].sum()
-    total_gp = total_actual - total_invertido
-    pct_gp = (total_gp / total_invertido * 100) if total_invertido != 0 else 0
-
+    total_actual    = df_compras["posicion_actual_rt"].sum() - df_ventas["posicion_actual_rt"].sum()
+    total_gp        = total_actual - total_invertido
+    pct_gp          = (total_gp / total_invertido * 100) if total_invertido != 0 else 0
+ 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("💰 Invertido", f"${total_invertido:,.2f}")
-    k2.metric("📈 Valor actual", f"${total_actual:,.2f}")
-    k3.metric("💹 G/P total", f"${total_gp:,.2f}")
-    k4.metric("📊 Rentabilidad", f"{pct_gp:.2f}%")
-
+    k1.metric("💰 Invertido",     f"${total_invertido:,.2f}")
+    k2.metric("📈 Valor actual",  f"${total_actual:,.2f}")
+    k3.metric("💹 G/P total",     f"${total_gp:,.2f}")
+    k4.metric("📊 Rentabilidad",  f"{pct_gp:.2f}%")
+ 
     st.divider()
-
-    # ── Tabs: Resumen por sector / por ticker / historial ────────────────────
+ 
     tab1, tab2, tab3 = st.tabs(["🗂️ Por Sector", "📋 Por Ticker", "📜 Historial"])
-
+ 
     with tab1:
         _vista_por_sector(df)
-
+ 
     with tab2:
-        _vista_por_ticker(df)
-
+        _vista_por_ticker(df, precios_rt=precios_rt, errores_rt=errores_rt)
+ 
     with tab3:
         _vista_historial(df)
 
@@ -1259,7 +1381,7 @@ def color_gp(val):
         num = float(val.replace('$','').replace(',','').replace('%',''))
         color = 'color: #2ecc71' if num >= 0 else 'color: #e74c3c'
         return color
-    except:
+    except Exception:
         return ''
 
 
@@ -1292,7 +1414,7 @@ def _vista_por_sector(df):
     df_mostrar["pct_total"] = df_mostrar["pct_total"].apply(lambda x: f"{x:.2f}%")
     df_mostrar.columns = ["Sector", "Invertido", "Valor Actual", "G/P", "G/P %", "% Total"]
     df_mostrar = df_mostrar[["Sector", "Valor Actual", "% Total", "G/P", "G/P %"]]
-    styled = df_mostrar.style.applymap(color_gp, subset=["G/P", "G/P %"])
+    styled = df_mostrar.style.map(color_gp, subset=["G/P", "G/P %"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # Gráfico donut
@@ -1309,39 +1431,69 @@ def _vista_por_sector(df):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _vista_por_ticker(df):
-    """Resumen agrupado por ticker."""
+def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
+    """
+    Resumen agrupado por ticker.
+    precios_rt: dict {ticker_original: precio_float} — si None usa precio del xlsx
+    errores_rt: dict {ticker_original: msg} — tickers sin precio en tiempo real
+    """
     df_c = df[df["tipo"] == "Compra"]
-
-    # Agrupar — cantidad neta, precio medio ponderado, precio_actual del último registro
+ 
     def precio_medio(g):
         return (g["precio_entrada"] * g["cantidad"]).sum() / g["cantidad"].sum()
-
+ 
     resumen = df_c.groupby(["ticker", "nombre", "sector"]).apply(
         lambda g: pd.Series({
             "cantidad": g["cantidad"].sum(),
             "precio_medio": precio_medio(g),
-            "precio_actual": g.sort_values("fecha_operacion").iloc[-1]["precio_actual"],
+            "precio_actual_xlsx": g.sort_values("fecha_operacion").iloc[-1]["precio_actual"],
         })
     ).reset_index()
-
+ 
+    # Aplicar precio en tiempo real si está disponible, sino fallback al xlsx
+    def resolver_precio(row):
+        if precios_rt and row["ticker"] in precios_rt:
+            return precios_rt[row["ticker"]]
+        return row["precio_actual_xlsx"]
+ 
+    resumen["precio_final"] = resumen.apply(resolver_precio, axis=1)
     resumen["posicion_inicial"] = resumen["cantidad"] * resumen["precio_medio"]
-    resumen["posicion_actual"] = resumen["cantidad"] * resumen["precio_actual"]
+    resumen["posicion_actual"] = resumen["cantidad"] * resumen["precio_final"]
     resumen["gp"] = resumen["posicion_actual"] - resumen["posicion_inicial"]
     total = resumen["posicion_actual"].sum()
     resumen["pct_total"] = resumen["posicion_actual"] / total * 100
     resumen = resumen.sort_values("posicion_actual", ascending=False)
-
+ 
     df_mostrar = resumen.copy()
     df_mostrar["cantidad"] = df_mostrar["cantidad"].apply(lambda x: f"{x:.4f}")
     df_mostrar["posicion_actual"] = df_mostrar["posicion_actual"].apply(lambda x: f"${x:,.2f}")
     df_mostrar["gp"] = df_mostrar["gp"].apply(lambda x: f"${x:,.2f}")
     df_mostrar["pct_total"] = df_mostrar["pct_total"].apply(lambda x: f"{x:.2f}%")
-    df_mostrar = df_mostrar[["nombre", "sector", "cantidad", "posicion_actual", "gp", "pct_total"]]
-    df_mostrar.columns = ["Activo", "Sector", "Cantidad", "Posición", "G/P", "% Total"]
+ 
+    # Columna de fuente del precio
+    def fuente_precio(ticker):
+        if precios_rt and ticker in precios_rt:
+            return "🟢 RT"
+        if errores_rt and ticker in errores_rt:
+            return "⚠️ xlsx"
+        return "📄 xlsx"
+ 
+    df_mostrar["Precio"] = resumen["ticker"].apply(fuente_precio)
+    df_mostrar = df_mostrar[["nombre", "sector", "cantidad", "posicion_actual", "gp", "pct_total", "Precio"]]
+    df_mostrar.columns = ["Activo", "Sector", "Cantidad", "Posición", "G/P", "% Total", "Precio"]
+ 
     styled = df_mostrar.style.applymap(color_gp, subset=["G/P", "% Total"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)    
-    
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+ 
+    # Nota aclaratoria si hay tickers con fallback
+    if errores_rt:
+        tickers_fallback = [t for t in errores_rt if t != "_global"]
+        if tickers_fallback:
+            st.caption(
+                f"⚠️ Precio xlsx (no RT): {', '.join(tickers_fallback)}. "
+                "Posible causa: ticker no reconocido por Yahoo Finance o mercado cerrado."
+            )
+ 
     fig = px.pie(
         resumen,
         values="posicion_actual",
@@ -1353,6 +1505,7 @@ def _vista_por_ticker(df):
     fig.update_traces(textposition="inside", textinfo="percent+label")
     fig.update_layout(showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
+ 
 
 
 def _vista_historial(df):

@@ -1390,7 +1390,7 @@ def _vista_por_sector(df):
     if "sector" not in df.columns:
         st.warning("Sin datos de sector.")
         return
-
+ 
     df_c = df[df["tipo"] == "Compra"]
     resumen = (
         df_c.groupby("sector")
@@ -1405,7 +1405,7 @@ def _vista_por_sector(df):
     total_actual = resumen["posicion_actual"].sum()
     resumen["pct_total"] = resumen["posicion_actual"] / total_actual * 100
     resumen = resumen.sort_values("posicion_actual", ascending=False)
-
+ 
     # Tabla
     df_mostrar = resumen.copy()
     df_mostrar["posicion_actual"] = df_mostrar["posicion_actual"].apply(lambda x: f"${x:,.2f}")
@@ -1416,27 +1416,32 @@ def _vista_por_sector(df):
     df_mostrar = df_mostrar[["Sector", "Valor Actual", "% Total", "G/P", "G/P %"]]
     styled = df_mostrar.style.map(color_gp, subset=["G/P", "G/P %"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # Gráfico donut
-    fig = px.pie(
-        resumen,
-        values="posicion_actual",
-        names="sector",
-        hole=0.45,
-        title="Distribución por sector",
-        color_discrete_sequence=px.colors.qualitative.Set2,
-    )
-    fig.update_traces(textposition="inside", textinfo="percent+label")
-    fig.update_layout(showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+ 
+    st.divider()
+ 
+    # ── Gráficos en dos columnas ──────────────────────────────────────────────
+    col_izq, col_der = st.columns(2)
+ 
+    with col_izq:
+        fig = px.pie(
+            resumen,
+            values="posicion_actual",
+            names="sector",
+            hole=0.45,
+            title="Distribución por sector",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+ 
+    with col_der:
+        st.markdown("#### 📈 Evolución histórica")
+        st.info("📊 Próximamente — valor de mercado vs coste a lo largo del tiempo")
 
 
 def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
-    """
-    Resumen agrupado por ticker.
-    precios_rt: dict {ticker_original: precio_float} — si None usa precio del xlsx
-    errores_rt: dict {ticker_original: msg} — tickers sin precio en tiempo real
-    """
+    """Resumen agrupado por ticker."""
     df_c = df[df["tipo"] == "Compra"]
  
     def precio_medio(g):
@@ -1450,7 +1455,6 @@ def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
         })
     ).reset_index()
  
-    # Aplicar precio en tiempo real si está disponible, sino fallback al xlsx
     def resolver_precio(row):
         if precios_rt and row["ticker"] in precios_rt:
             return precios_rt[row["ticker"]]
@@ -1470,7 +1474,6 @@ def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
     df_mostrar["gp"] = df_mostrar["gp"].apply(lambda x: f"${x:,.2f}")
     df_mostrar["pct_total"] = df_mostrar["pct_total"].apply(lambda x: f"{x:.2f}%")
  
-    # Columna de fuente del precio
     def fuente_precio(ticker):
         if precios_rt and ticker in precios_rt:
             return "🟢 RT"
@@ -1485,7 +1488,6 @@ def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
     styled = df_mostrar.style.map(color_gp, subset=["G/P", "% Total"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
  
-    # Nota aclaratoria si hay tickers con fallback
     if errores_rt:
         tickers_fallback = [t for t in errores_rt if t != "_global"]
         if tickers_fallback:
@@ -1494,17 +1496,27 @@ def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
                 "Posible causa: ticker no reconocido por Yahoo Finance o mercado cerrado."
             )
  
-    fig = px.pie(
-        resumen,
-        values="posicion_actual",
-        names="nombre",
-        hole=0.45,
-        title="Distribución por activo",
-        color_discrete_sequence=px.colors.qualitative.Set2,
-    )
-    fig.update_traces(textposition="inside", textinfo="percent+label")
-    fig.update_layout(showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.divider()
+ 
+    # ── Gráficos en dos columnas ──────────────────────────────────────────────
+    col_izq, col_der = st.columns(2)
+ 
+    with col_izq:
+        fig = px.pie(
+            resumen,
+            values="posicion_actual",
+            names="nombre",
+            hole=0.45,
+            title="Distribución por activo",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+ 
+    with col_der:
+        st.markdown("#### 📈 Evolución histórica")
+        st.info("📊 Próximamente — valor de mercado vs coste a lo largo del tiempo")
  
 
 

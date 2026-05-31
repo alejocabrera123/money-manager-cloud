@@ -1482,7 +1482,7 @@ def _vista_por_ticker(df, precios_rt=None, errores_rt=None):
     df_mostrar = df_mostrar[["nombre", "sector", "cantidad", "posicion_actual", "gp", "pct_total", "Precio"]]
     df_mostrar.columns = ["Activo", "Sector", "Cantidad", "Posición", "G/P", "% Total", "Precio"]
  
-    styled = df_mostrar.style.applymap(color_gp, subset=["G/P", "% Total"])
+    styled = df_mostrar.style.map(color_gp, subset=["G/P", "% Total"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
  
     # Nota aclaratoria si hay tickers con fallback

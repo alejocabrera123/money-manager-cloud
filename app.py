@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import os
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
+import re
 
 load_dotenv()
 
@@ -725,6 +726,33 @@ def pagina_sync(supabase, user_id):
         except Exception as e:
             st.error(f"❌ Error al procesar el CSV: {e}")
 
+    # ── Sección 3: Sincronizar cartera ────────────────────────────────────────
+    st.divider()
+    st.subheader("💼 Sincronizar Cartera")
+    st.write("Sube el xlsx exportado desde Google Sheets (pestaña 'INV Esp').")
+
+    archivo_cartera = st.file_uploader(
+        "Selecciona tu archivo xlsx de cartera",
+        type=["xlsx"],
+        key="xlsx_cartera"
+    )
+
+    if archivo_cartera:
+        try:
+            df_trans, df_tickers = procesar_xlsx_cartera(archivo_cartera)
+            st.success(f"✅ **{len(df_trans)} transacciones** detectadas — **{len(df_tickers)} tickers** únicos")
+            st.dataframe(df_trans[["ticker", "tipo", "fecha_operacion", "cantidad", "precio_entrada", "precio_actual"]].head(10),
+                        use_container_width=True)
+            st.caption(f"Mostrando 10 de {len(df_trans)} transacciones")
+            if st.button("🔄 Sincronizar cartera", type="primary", key="btn_sync_cartera"):
+                with st.spinner("Sincronizando cartera..."):
+                    total = sincronizar_cartera(df_trans, df_tickers, supabase, user_id)
+                    get_cartera.clear()
+                    get_tickers_sin_sector.clear()
+                st.success(f"✅ **{total} transacciones** sincronizadas correctamente")
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+
 def pagina_proyeccion(supabase, user_id):
     anio = date.today().year
     fecha_inicio = f"{anio}-01-01"
@@ -913,6 +941,441 @@ def pagina_proyeccion(supabase, user_id):
         hide_index=True
     )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPRINT 8 — CARTERA v1
+# Instrucciones de integración en app.py:
+#
+# 1. Añadir las funciones de este archivo a app.py (antes de main())
+# 2. En main(), añadir "💼 Cartera" al st.sidebar.radio()
+# 3. En main(), añadir el elif correspondiente: pagina_cartera(supabase, user_id)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import re  # ya importado en app.py? no — AÑADIR al bloque de imports de app.py
+
+
+# ── Helpers de parseo del xlsx ────────────────────────────────────────────────
+
+def _extraer_nombre_xlsx(val):
+    """Extrae nombre legible de una celda que puede ser fórmula GOOGLEFINANCE."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s.startswith("="):
+        m = re.search(r'"([^"]+)"\s*\)$', s)
+        return m.group(1) if m else None
+    return s
+
+
+def _extraer_precio_xlsx(val):
+    """Extrae precio numérico del fallback de una fórmula GOOGLEFINANCE."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val)
+    if s.startswith("="):
+        m = re.search(r",\s*([\d.]+)\s*\)", s)
+        return float(m.group(1)) if m else None
+    return None
+
+
+# ── Procesado del xlsx ────────────────────────────────────────────────────────
+
+def procesar_xlsx_cartera(archivo):
+    """
+    Lee la pestaña 'INV Esp' del xlsx exportado desde Google Sheets.
+    Devuelve:
+      - df_transacciones: DataFrame con columnas para tabla `cartera`
+      - df_tickers: DataFrame con columnas para tabla `cartera_tickers`
+    """
+    import openpyxl
+    from datetime import datetime
+
+    wb = openpyxl.load_workbook(archivo)
+
+    if "INV Esp" not in wb.sheetnames:
+        raise ValueError("No se encontró la pestaña 'INV Esp' en el archivo.")
+
+    ws = wb["INV Esp"]
+
+    # ── 1. Mapa nombre → sector desde filas 13-27 (tabla resumen por ticker) ──
+    sector_map = {}
+    for row in ws.iter_rows(min_row=13, max_row=27, values_only=True):
+        nombre, sector = row[0], row[1]
+        if nombre and sector and not str(nombre).startswith("="):
+            sector_map[nombre.strip()] = sector.strip()
+
+    # ── 2. Transacciones desde fila 31 ────────────────────────────────────────
+    transacciones = []
+    for row in ws.iter_rows(min_row=31, max_row=ws.max_row, values_only=True):
+        # Parar si la fila está vacía
+        if not any(v is not None for v in row[:6]):
+            break
+
+        nombre = _extraer_nombre_xlsx(row[0])
+        ticker = row[1]
+        fecha = row[2]
+        tipo = row[3]
+        cantidad = row[4]
+        precio_entrada = row[5]
+        precio_actual = _extraer_precio_xlsx(row[6])
+
+        # Saltar filas incompletas
+        if not ticker or not fecha or not nombre:
+            continue
+
+        fecha_dt = fecha.date() if isinstance(fecha, datetime) else fecha
+        sector = sector_map.get(nombre)
+
+        transacciones.append({
+            "ticker": str(ticker).strip(),
+            "nombre": nombre,
+            "sector": sector,
+            "tipo": str(tipo).strip() if tipo else "Compra",
+            "fecha_operacion": str(fecha_dt),
+            "cantidad": float(cantidad) if cantidad else 0.0,
+            "precio_entrada": float(precio_entrada) if precio_entrada else 0.0,
+            "precio_actual": precio_actual,
+            "moneda": "USD",
+        })
+
+    if not transacciones:
+        raise ValueError("No se encontraron transacciones en la pestaña 'INV Esp'.")
+
+    import pandas as pd
+    df_transacciones = pd.DataFrame(transacciones)
+
+    # ── 3. df_tickers: un registro por ticker único (para cartera_tickers) ────
+    df_tickers = (
+        df_transacciones[["ticker", "nombre", "sector", "moneda"]]
+        .drop_duplicates(subset="ticker")
+        .reset_index(drop=True)
+    )
+
+    return df_transacciones, df_tickers
+
+
+# ── Sincronización con Supabase ───────────────────────────────────────────────
+
+def sincronizar_cartera(df_transacciones, df_tickers, supabase, user_id):
+    """
+    1. Upsert en cartera_tickers (ticker + user_id como clave única)
+    2. DELETE + INSERT en cartera (mismo patrón que gastos)
+    Devuelve número de transacciones insertadas.
+    """
+    # # Asegurar token autenticado
+    if "access_token" in st.session_state and st.session_state.access_token:
+        supabase.postgrest.auth(st.session_state.access_token)
+
+    # 1. Upsert tickers — preserva sectores manuales si ya existen
+    for _, row in df_tickers.iterrows():
+        supabase.table("cartera_tickers").upsert(
+            {
+                "ticker": row["ticker"],
+                "nombre": row["nombre"],
+                "sector": row["sector"],
+                "moneda": row["moneda"],
+                "user_id": user_id,
+            },
+            on_conflict="ticker,user_id",
+        ).execute()
+
+    # 2. DELETE + INSERT transacciones
+    supabase.table("cartera").delete().eq("user_id", user_id).execute()
+
+    registros = df_transacciones.to_dict(orient="records")
+    for r in registros:
+        r["user_id"] = user_id
+        # Eliminar columnas que no van en `cartera` (sector/moneda van en cartera_tickers)
+        r.pop("sector", None)
+        r.pop("moneda", None)
+        r.pop("nombre", None)
+
+    for i in range(0, len(registros), 500):
+        supabase.table("cartera").insert(registros[i : i + 500]).execute()
+
+    return len(registros)
+
+
+# ── Queries ───────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)
+def get_cartera(_supabase, user_id):
+    """
+    Devuelve DataFrame con todas las transacciones + sector/nombre de cartera_tickers.
+    Columnas calculadas: posicion_inicial, posicion_actual, gp
+    """
+    result_c = (
+        _supabase.table("cartera")
+        .select("ticker, tipo, fecha_operacion, cantidad, precio_entrada, precio_actual")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    result_t = (
+        _supabase.table("cartera_tickers")
+        .select("ticker, nombre, sector, moneda")
+        .eq("user_id", user_id)
+        .execute()
+    )
+
+    if not result_c.data:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(result_c.data)
+    df["fecha_operacion"] = pd.to_datetime(df["fecha_operacion"])
+    df["cantidad"] = df["cantidad"].astype(float)
+    df["precio_entrada"] = df["precio_entrada"].astype(float)
+    df["precio_actual"] = df["precio_actual"].astype(float)
+    df["posicion_inicial"] = df["cantidad"] * df["precio_entrada"]
+    df["posicion_actual"] = df["cantidad"] * df["precio_actual"]
+    df["gp"] = df["posicion_actual"] - df["posicion_inicial"]
+
+    if result_t.data:
+        df_tickers = pd.DataFrame(result_t.data)
+        df = df.merge(df_tickers, on="ticker", how="left")
+
+    return df
+
+
+@st.cache_data(ttl=300)
+def get_tickers_sin_sector(_supabase, user_id):
+    """Devuelve lista de tickers que tienen sector NULL o vacío."""
+    result = (
+        _supabase.table("cartera_tickers")
+        .select("ticker, nombre")
+        .eq("user_id", user_id)
+        .is_("sector", "null")
+        .execute()
+    )
+    return result.data or []
+
+
+# ── Widget: asignar sector a tickers nuevos ───────────────────────────────────
+
+def widget_asignar_sector(supabase, user_id):
+    """
+    Muestra selectbox para asignar sector a tickers que no lo tienen.
+    Se llama desde pagina_cartera si hay tickers sin sector.
+    """
+    tickers_sin_sector = get_tickers_sin_sector(supabase, user_id)
+    if not tickers_sin_sector:
+        return
+
+    # Sectores ya usados por este usuario
+    result = (
+        supabase.table("cartera_tickers")
+        .select("sector")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    sectores_existentes = sorted(
+        set(r["sector"] for r in (result.data or []) if r.get("sector"))
+    )
+
+    st.warning(
+        f"⚠️ {len(tickers_sin_sector)} ticker(s) sin sector asignado. "
+        "Asígnalos para que aparezcan en los resúmenes."
+    )
+
+    for item in tickers_sin_sector:
+        ticker = item["ticker"]
+        nombre = item.get("nombre", ticker)
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            st.markdown(f"**{ticker}** — {nombre}")
+        with col2:
+            opciones = sectores_existentes + ["➕ Nuevo sector..."]
+            seleccion = st.selectbox(
+                "Sector",
+                opciones,
+                key=f"sector_sel_{ticker}",
+                label_visibility="collapsed",
+            )
+            if seleccion == "➕ Nuevo sector...":
+                seleccion = st.text_input(
+                    "Nuevo sector",
+                    key=f"sector_nuevo_{ticker}",
+                    placeholder="Ej: Healthcare",
+                )
+        with col3:
+            if st.button("💾 Guardar", key=f"sector_btn_{ticker}"):
+                if seleccion and seleccion != "➕ Nuevo sector...":
+                    supabase.table("cartera_tickers").update(
+                        {"sector": seleccion}
+                    ).eq("ticker", ticker).eq("user_id", user_id).execute()
+                    get_cartera.clear()
+                    get_tickers_sin_sector.clear()
+                    st.success(f"✅ {ticker} → {seleccion}")
+                    st.rerun()
+
+
+# ── Página principal ──────────────────────────────────────────────────────────
+
+def pagina_cartera(supabase, user_id):
+    st.title("💼 Cartera de Inversiones")
+
+    # Detectar tickers sin sector antes de cargar datos
+    widget_asignar_sector(supabase, user_id)
+
+    with st.spinner("Cargando cartera..."):
+        df = get_cartera(supabase, user_id)
+
+    if df.empty:
+        st.info("No hay datos de cartera. Sube tu xlsx en 📤 Sincronizar.")
+        return
+
+    # ── KPIs globales ─────────────────────────────────────────────────────────
+    # Posición neta por ticker: Compras - Ventas
+    df_compras = df[df["tipo"] == "Compra"]
+    df_ventas = df[df["tipo"] == "Venta"]
+
+    total_invertido = df_compras["posicion_inicial"].sum() - df_ventas["posicion_inicial"].sum()
+    total_actual = df_compras["posicion_actual"].sum() - df_ventas["posicion_actual"].sum()
+    total_gp = total_actual - total_invertido
+    pct_gp = (total_gp / total_invertido * 100) if total_invertido != 0 else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("💰 Invertido", f"${total_invertido:,.2f}")
+    k2.metric("📈 Valor actual", f"${total_actual:,.2f}")
+    k3.metric("💹 G/P total", f"${total_gp:,.2f}")
+    k4.metric("📊 Rentabilidad", f"{pct_gp:.2f}%")
+
+    st.divider()
+
+    # ── Tabs: Resumen por sector / por ticker / historial ────────────────────
+    tab1, tab2, tab3 = st.tabs(["🗂️ Por Sector", "📋 Por Ticker", "📜 Historial"])
+
+    with tab1:
+        _vista_por_sector(df)
+
+    with tab2:
+        _vista_por_ticker(df)
+
+    with tab3:
+        _vista_historial(df)
+
+def color_gp(val):
+    try:
+        num = float(val.replace('$','').replace(',','').replace('%',''))
+        color = 'color: #2ecc71' if num >= 0 else 'color: #e74c3c'
+        return color
+    except:
+        return ''
+
+
+def _vista_por_sector(df):
+    """Resumen agrupado por sector."""
+    if "sector" not in df.columns:
+        st.warning("Sin datos de sector.")
+        return
+
+    df_c = df[df["tipo"] == "Compra"]
+    resumen = (
+        df_c.groupby("sector")
+        .agg(
+            posicion_inicial=("posicion_inicial", "sum"),
+            posicion_actual=("posicion_actual", "sum"),
+        )
+        .reset_index()
+    )
+    resumen["gp"] = resumen["posicion_actual"] - resumen["posicion_inicial"]
+    resumen["gp_pct"] = resumen["gp"] / resumen["posicion_inicial"] * 100
+    total_actual = resumen["posicion_actual"].sum()
+    resumen["pct_total"] = resumen["posicion_actual"] / total_actual * 100
+    resumen = resumen.sort_values("posicion_actual", ascending=False)
+
+    # Tabla
+    df_mostrar = resumen.copy()
+    df_mostrar["posicion_actual"] = df_mostrar["posicion_actual"].apply(lambda x: f"${x:,.2f}")
+    df_mostrar["gp"] = df_mostrar["gp"].apply(lambda x: f"${x:,.2f}")
+    df_mostrar["gp_pct"] = df_mostrar["gp_pct"].apply(lambda x: f"{x:.2f}%")
+    df_mostrar["pct_total"] = df_mostrar["pct_total"].apply(lambda x: f"{x:.2f}%")
+    df_mostrar.columns = ["Sector", "Invertido", "Valor Actual", "G/P", "G/P %", "% Total"]
+    df_mostrar = df_mostrar[["Sector", "Valor Actual", "% Total", "G/P", "G/P %"]]
+    styled = df_mostrar.style.applymap(color_gp, subset=["G/P", "G/P %"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Gráfico donut
+    fig = px.pie(
+        resumen,
+        values="posicion_actual",
+        names="sector",
+        hole=0.45,
+        title="Distribución por sector",
+        color_discrete_sequence=px.colors.qualitative.Set2,
+    )
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    fig.update_layout(showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _vista_por_ticker(df):
+    """Resumen agrupado por ticker."""
+    df_c = df[df["tipo"] == "Compra"]
+
+    # Agrupar — cantidad neta, precio medio ponderado, precio_actual del último registro
+    def precio_medio(g):
+        return (g["precio_entrada"] * g["cantidad"]).sum() / g["cantidad"].sum()
+
+    resumen = df_c.groupby(["ticker", "nombre", "sector"]).apply(
+        lambda g: pd.Series({
+            "cantidad": g["cantidad"].sum(),
+            "precio_medio": precio_medio(g),
+            "precio_actual": g.sort_values("fecha_operacion").iloc[-1]["precio_actual"],
+        })
+    ).reset_index()
+
+    resumen["posicion_inicial"] = resumen["cantidad"] * resumen["precio_medio"]
+    resumen["posicion_actual"] = resumen["cantidad"] * resumen["precio_actual"]
+    resumen["gp"] = resumen["posicion_actual"] - resumen["posicion_inicial"]
+    total = resumen["posicion_actual"].sum()
+    resumen["pct_total"] = resumen["posicion_actual"] / total * 100
+    resumen = resumen.sort_values("posicion_actual", ascending=False)
+
+    df_mostrar = resumen.copy()
+    df_mostrar["cantidad"] = df_mostrar["cantidad"].apply(lambda x: f"{x:.4f}")
+    df_mostrar["posicion_actual"] = df_mostrar["posicion_actual"].apply(lambda x: f"${x:,.2f}")
+    df_mostrar["gp"] = df_mostrar["gp"].apply(lambda x: f"${x:,.2f}")
+    df_mostrar["pct_total"] = df_mostrar["pct_total"].apply(lambda x: f"{x:.2f}%")
+    df_mostrar = df_mostrar[["nombre", "sector", "cantidad", "posicion_actual", "gp", "pct_total"]]
+    df_mostrar.columns = ["Activo", "Sector", "Cantidad", "Posición", "G/P", "% Total"]
+    styled = df_mostrar.style.applymap(color_gp, subset=["G/P", "% Total"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)    
+    
+    fig = px.pie(
+        resumen,
+        values="posicion_actual",
+        names="nombre",
+        hole=0.45,
+        title="Distribución por activo",
+        color_discrete_sequence=px.colors.qualitative.Set2,
+    )
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    fig.update_layout(showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _vista_historial(df):
+    """Tabla de todas las transacciones ordenadas por fecha."""
+    df_hist = df.sort_values("fecha_operacion", ascending=False).copy()
+    df_hist["fecha_operacion"] = df_hist["fecha_operacion"].dt.strftime("%d/%m/%Y")
+    df_hist["cantidad"] = df_hist["cantidad"].apply(lambda x: f"{x:.4f}")
+    df_hist["precio_entrada"] = df_hist["precio_entrada"].apply(lambda x: f"${x:,.3f}")
+    df_hist["precio_actual"] = df_hist["precio_actual"].apply(lambda x: f"${x:,.3f}" if x else "—")
+    df_hist["posicion_inicial"] = df_hist["posicion_inicial"].apply(lambda x: f"${x:,.2f}")
+    df_hist["posicion_actual"] = df_hist["posicion_actual"].apply(lambda x: f"${x:,.2f}")
+    df_hist["gp"] = df_hist["gp"].apply(lambda x: f"${x:,.2f}")
+
+    cols = ["fecha_operacion", "nombre", "ticker", "tipo", "cantidad",
+            "precio_entrada", "precio_actual", "posicion_inicial", "posicion_actual", "gp"]
+    cols_existentes = [c for c in cols if c in df_hist.columns]
+    df_mostrar = df_hist[cols_existentes].copy()
+    df_mostrar.columns = [c.replace("_", " ").title() for c in cols_existentes]
+
+    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+
+
+
 def main():
     if not login_page():
         return
@@ -930,7 +1393,7 @@ def main():
     pagina = st.sidebar.radio(
         "Ir a:",
         ["📊 Dashboard", "📈 Histórico", "🔍 Detalle",
-         "💳 Bancos", "🔮 Proyección", "📤 Sincronizar"],
+     "💳 Bancos", "🔮 Proyección", "💼 Cartera", "📤 Sincronizar"],
         index=0
     )
 
@@ -960,6 +1423,8 @@ def main():
         pagina_proyeccion(supabase, user_id)
     elif pagina == "📤 Sincronizar":
         pagina_sync(supabase, user_id)
+    elif pagina == "💼 Cartera":
+        pagina_cartera(supabase, user_id)
 
 if __name__ == "__main__":
     main()

@@ -59,7 +59,7 @@ def login_page():
 def get_user_id():
     return st.session_state.user.id
 
-def procesar_xlsx(archivo):
+def procesar_xlsx(archivo, nombre_cuenta="Euros"):
     df = pd.read_excel(archivo)
     columnas_esperadas = [
         "Según un período", "Cuentas", "Categoría",
@@ -68,7 +68,7 @@ def procesar_xlsx(archivo):
     columnas_faltantes = [c for c in columnas_esperadas if c not in df.columns]
     if columnas_faltantes:
         raise ValueError(f"Columnas faltantes en el archivo: {columnas_faltantes}")
-    df = df[df["Cuentas"] == "Euros"].copy()
+    df = df[df["Cuentas"] == nombre_cuenta].copy()
     df = df.rename(columns={
         "Según un período": "fecha_gasto",
         "Cuentas": "cuenta",
@@ -1592,8 +1592,29 @@ def pagina_sync(supabase, user_id):
 
     if archivo:
         try:
-            df = procesar_xlsx(archivo)
-            st.success(f"✅ Archivo cargado: **{len(df)} registros** de cuenta Euros detectados")
+            # Validar columnas duplicadas
+            cols_originales = pd.read_excel(archivo, nrows=0).columns.tolist()
+            archivo.seek(0)
+            duplicadas = [c for c in set(cols_originales) if cols_originales.count(c) > 1]
+            if duplicadas:
+                st.warning(
+                    f"⚠️ El archivo tiene columnas duplicadas: {', '.join(duplicadas)}. "
+                    "Pandas las renombrará automáticamente, pero revisa que no afecte a los datos."
+                )
+
+            # Detectar cuentas disponibles
+            df_preview_cuentas = pd.read_excel(archivo)
+            archivo.seek(0)
+            cuentas_disponibles = sorted(df_preview_cuentas["Cuentas"].dropna().unique().tolist())
+
+            cuenta_sel = st.selectbox(
+                "¿Qué cuenta corresponde a tus gastos personales?",
+                cuentas_disponibles,
+                index=cuentas_disponibles.index("Euros") if "Euros" in cuentas_disponibles else 0
+            )
+
+            df = procesar_xlsx(archivo, nombre_cuenta=cuenta_sel)
+            st.success(f"✅ Archivo cargado: **{len(df)} registros** de cuenta '{cuenta_sel}' detectados")
             st.dataframe(df[["fecha_gasto", "categoria_consumo", "monto", "tipo"]].head(10),
                          use_container_width=True)
             st.caption(f"Mostrando 10 de {len(df)} registros")

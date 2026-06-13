@@ -924,6 +924,30 @@ def get_tickers_sin_sector(_supabase, user_id):
         .execute()
     return result.data or []
 
+@st.cache_data(ttl=300)
+def get_efectivo_actual(_supabase, user_id, cartera_id):
+    """Devuelve el último snapshot de efectivo para una cartera."""
+    result = _supabase.table("cartera_efectivo")\
+        .select("monto, fecha_registro")\
+        .eq("user_id", user_id)\
+        .eq("cartera_id", cartera_id)\
+        .order("fecha_registro", desc=True)\
+        .limit(1)\
+        .execute()
+    if not result.data:
+        return 0.0, None
+    return float(result.data[0]["monto"]), result.data[0]["fecha_registro"]
+
+def guardar_efectivo(supabase, user_id, cartera_id, monto):
+    """Inserta un nuevo snapshot de efectivo (no sobrescribe historial)."""
+    hoy = str(date.today())
+    supabase.table("cartera_efectivo").insert({
+        "user_id": user_id,
+        "cartera_id": cartera_id,
+        "monto": float(monto),
+        "fecha_registro": hoy
+    }).execute()
+
 # ── Cartera: sincronización xlsx (carga inicial) ──────────────────────────────
 
 def sincronizar_cartera(df_transacciones, df_tickers, supabase, user_id, cartera_id):
@@ -1052,6 +1076,30 @@ def formulario_nueva_posicion(supabase, user_id, cartera_id):
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error al guardar: {e}")
+
+
+# ── Widget editable ───────────────────────────────────────────────────────────
+
+def widget_efectivo(supabase, user_id, cartera_id, moneda_sym):
+    """Widget para ver/actualizar el efectivo disponible en la cartera."""
+    monto_actual, fecha = get_efectivo_actual(supabase, user_id, cartera_id)
+
+    with st.expander(f"💵 Efectivo disponible: {moneda_sym}{monto_actual:,.2f}", expanded=False):
+        if fecha:
+            st.caption(f"Última actualización: {fecha}")
+        nuevo_monto = st.number_input(
+            "Actualizar efectivo disponible",
+            min_value=0.0, step=0.01, value=monto_actual,
+            format="%.2f", key=f"efectivo_{cartera_id}"
+        )
+        if st.button("💾 Guardar efectivo", key=f"btn_efectivo_{cartera_id}"):
+            guardar_efectivo(supabase, user_id, cartera_id, nuevo_monto)
+            get_efectivo_actual.clear()
+            st.success("✅ Efectivo actualizado")
+            st.rerun()
+
+    return monto_actual
+
 
 # ── Cartera: widget asignar sector ────────────────────────────────────────────
 
@@ -1452,6 +1500,7 @@ def pagina_cartera(supabase, user_id):
 
             # Formulario añadir posición
             formulario_nueva_posicion(supabase, user_id, cartera_id)
+            efectivo_actual = widget_efectivo(supabase, user_id, cartera_id, moneda_sym)
 
             with st.spinner("Cargando cartera..."):
                 df = get_cartera(supabase, user_id, cartera_id)
@@ -1489,17 +1538,31 @@ def pagina_cartera(supabase, user_id):
             df_kpi["posicion_actual_rt"] = df_kpi["cantidad"] * df_kpi["precio_final"]
             df_kpi["gp_rt"] = df_kpi["posicion_actual_rt"] - df_kpi["posicion_inicial"]
 
+# Invertido neto: para cada ticker vendido, restar el COSTE de compra
+            # de las unidades vendidas (no el precio de venta)
             df_compras = df_kpi[df_kpi["tipo"] == "Compra"]
             df_ventas  = df_kpi[df_kpi["tipo"] == "Venta"]
 
-            total_invertido = df_compras["posicion_inicial"].sum() - df_ventas["posicion_inicial"].sum()
+            precio_medio_compra = (
+                df_compras.groupby("ticker")
+                .apply(lambda g: (g["precio_entrada"] * g["cantidad"]).sum() / g["cantidad"].sum())
+            )
+
+            coste_ventas = df_ventas.apply(
+                lambda row: row["cantidad"] * precio_medio_compra.get(row["ticker"], row["precio_entrada"]),
+                axis=1
+            ).sum()
+
+            total_invertido = df_compras["posicion_inicial"].sum() - coste_ventas
             total_actual    = df_compras["posicion_actual_rt"].sum() - df_ventas["posicion_actual_rt"].sum()
+            total_actual_con_efectivo = total_actual + efectivo_actual
             total_gp        = total_actual - total_invertido
             pct_gp          = (total_gp / total_invertido * 100) if total_invertido != 0 else 0
 
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("💰 Invertido",    f"{moneda_sym}{total_invertido:,.2f}")
-            k2.metric("📈 Valor actual", f"{moneda_sym}{total_actual:,.2f}")
+            k2.metric("📈 Valor actual", f"{moneda_sym}{total_actual_con_efectivo:,.2f}",
+                     help=f"Incluye {moneda_sym}{efectivo_actual:,.2f} en efectivo")
             k3.metric("💹 G/P total",    f"{moneda_sym}{total_gp:,.2f}")
             k4.metric("📊 Rentabilidad", f"{pct_gp:.2f}%")
 

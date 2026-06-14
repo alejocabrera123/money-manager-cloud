@@ -129,6 +129,36 @@ def get_todos_gastos(_supabase, user_id):
     df["mes_anio"] = df["fecha_gasto"].dt.to_period("M")
     return df
 
+def calcular_stats_gastos_6m(_supabase, user_id):
+    """Balance neto mensual de los últimos 6 meses completos: media, mediana, std, máx/mín."""
+    df = get_todos_gastos(_supabase, user_id)
+    if df.empty:
+        return None
+
+    mes_actual = pd.Timestamp.today().to_period('M')
+    balances = df.groupby('mes_anio')['importe'].sum()
+    balances = balances[balances.index < mes_actual].sort_index().tail(6)
+
+    if balances.empty:
+        return None
+
+    meses_es = {1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',
+                7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'}
+
+    def nombre_mes(periodo):
+        return f"{meses_es[periodo.month]} {periodo.year}"
+
+    return {
+        'media': balances.mean(),
+        'mediana': balances.median(),
+        'std': balances.std() if len(balances) > 1 else 0.0,
+        'max_val': balances.max(),
+        'max_mes': nombre_mes(balances.idxmax()),
+        'min_val': balances.min(),
+        'min_mes': nombre_mes(balances.idxmin()),
+        'n_meses': len(balances)
+    }
+
 def get_gastos_mes(supabase, year, month, user_id):
     inicio = date(year, month, 1)
     fin = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
@@ -148,6 +178,31 @@ def get_presupuestos_mes(supabase, year, month, user_id):
         .eq("fecha", str(inicio))\
         .execute()
     return pd.DataFrame(result.data) if result.data else pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def get_categorias_usuario(_supabase, user_id):
+    """Devuelve categorías únicas de presupuestos del usuario."""
+    result = _supabase.table("presupuestos")\
+        .select("categoria_consumo")\
+        .eq("user_id", user_id)\
+        .execute()
+    return sorted(set(r["categoria_consumo"] for r in (result.data or [])))
+
+def get_presupuestos_anio(supabase, year, user_id):
+    """Suma de presupuestos por categoría para el año completo (todas las filas cargadas)."""
+    inicio = date(year, 1, 1)
+    fin = date(year + 1, 1, 1)
+    result = supabase.table("presupuestos")\
+        .select("categoria_consumo, monto")\
+        .eq("user_id", user_id)\
+        .gte("fecha", str(inicio))\
+        .lt("fecha", str(fin))\
+        .execute()
+    if not result.data:
+        return pd.DataFrame(columns=["categoria_consumo", "monto"])
+    df = pd.DataFrame(result.data)
+    return df.groupby("categoria_consumo")["monto"].sum().reset_index()
+
 
 @st.cache_data(ttl=300)
 def get_balance_app(_supabase, user_id):
@@ -1203,6 +1258,17 @@ def convertir_ticker_yfinance(ticker_original):
 
     return t
 
+@st.cache_data(ttl=3600)
+def obtener_tipo_cambio_usd_eur():
+    """Devuelve cuántos EUR equivale 1 USD. Cacheado 1h."""
+    try:
+        data = yf.download("EURUSD=X", period="1d", interval="1d",
+                            auto_adjust=True, progress=False)
+        eur_usd = float(data["Close"].iloc[-1])  # cuántos USD por 1 EUR
+        return 1 / eur_usd  # cuántos EUR por 1 USD
+    except Exception:
+        return None  # fallback: el prompt indica "no disponible"
+
 def get_precios_yfinance(tickers_originales):
     precios = {}
     errores = {}
@@ -1451,6 +1517,346 @@ def _vista_historial(df, supabase, user_id, cartera_id):
                 get_cartera.clear()
                 st.info("Posición eliminada. Recupérala con el toggle de arriba.")
                 st.rerun()
+
+# ── Master Prompt Engine: helpers ─────────────────────────────────────────────
+# Creación de Tabla Mardown para el Master Prompt
+
+def generar_tabla_anual(supabase, user_id, year):
+    """Tabla anual: Presupuesto Anual vs Real YTD por categoría + balance YTD.
+    Si no hay presupuestos cargados, muestra solo gastos/ingresos reales YTD."""
+    hoy = date.today()
+
+    df_todos = get_todos_gastos(supabase, user_id)
+    if not df_todos.empty:
+        df_ytd = df_todos[
+            (df_todos["anio"] == year) &
+            (df_todos["fecha_gasto"].dt.date <= hoy)
+        ]
+        real_ytd = df_ytd.groupby("categoria_consumo")["importe"].sum().reset_index()
+        real_ytd.columns = ["categoria_consumo", "real_ytd"]
+        balance_ytd = real_ytd["real_ytd"].sum()
+    else:
+        real_ytd = pd.DataFrame(columns=["categoria_consumo", "real_ytd"])
+        balance_ytd = 0.0
+
+    df_presup_anio = get_presupuestos_anio(supabase, year, user_id)
+    mask_otros_real = real_ytd["categoria_consumo"].isin(CATEGORIAS_OTROS)
+
+    if df_presup_anio.empty:
+        # ── Sin presupuesto (ej. Alicia): solo reales YTD ──
+        df_principales = real_ytd[~mask_otros_real].copy()
+        df_otros = real_ytd[mask_otros_real].copy()
+        df_principales.columns = ["Categoría", "Real YTD"]
+        df_principales = df_principales.reindex(
+            df_principales["Real YTD"].abs().sort_values(ascending=False).index
+        )
+
+        lineas = ["| Categoría | Real YTD |", "|---|---|"]
+        for _, row in df_principales.iterrows():
+            lineas.append(f"| {row['Categoría']} | €{row['Real YTD']:,.2f} |")
+
+        nota = ""
+        if not df_otros.empty:
+            otros_sum = df_otros["real_ytd"].sum()
+            lineas.append(f"| Otras Categorías | €{otros_sum:,.2f} |")
+            cats_lista = ", ".join(sorted(df_otros["categoria_consumo"].tolist()))
+            nota = f"\n\n_Otras Categorías incluye: {cats_lista}._"
+
+        nota += "\n\n_Sin presupuesto configurado — solo gastos/ingresos reales acumulados en el año (YTD)._"
+        return "\n".join(lineas) + nota, balance_ytd
+
+    # ── Con presupuesto: Presupuesto Anual | Real YTD | % Alcance ──
+    df_tabla = pd.merge(df_presup_anio, real_ytd, on="categoria_consumo", how="outer").fillna(0)
+    df_tabla.columns = ["Categoría", "Presupuesto Anual", "Real YTD"]
+
+    mask_otros = df_tabla["Categoría"].isin(CATEGORIAS_OTROS)
+    df_principales = df_tabla[~mask_otros].copy()
+    df_otros = df_tabla[mask_otros].copy()
+
+    if not df_otros.empty:
+        fila_otros = pd.DataFrame([{
+            "Categoría": "Otras Categorías",
+            "Presupuesto Anual": df_otros["Presupuesto Anual"].sum(),
+            "Real YTD": df_otros["Real YTD"].sum(),
+        }])
+        df_final = pd.concat([df_principales, fila_otros], ignore_index=True)
+        cats_lista = ", ".join(sorted(df_otros["Categoría"].tolist()))
+        nota = f"\n\n_Otras Categorías incluye: {cats_lista}._"
+    else:
+        df_final = df_principales
+        nota = ""
+
+    def calc_alcance(row):
+        if row["Presupuesto Anual"] == 0:
+            return None
+        return row["Real YTD"] / row["Presupuesto Anual"] * 100
+
+    df_final["% Alcance"] = df_final.apply(calc_alcance, axis=1)
+    df_final = df_final.reindex(
+        df_final["Real YTD"].abs().sort_values(ascending=False).index
+    )
+
+    lineas = ["| Categoría | Presupuesto Anual | Real YTD | % Alcance |", "|---|---|---|---|"]
+    for _, row in df_final.iterrows():
+        alcance = f"{row['% Alcance']:.0f}%" if pd.notna(row["% Alcance"]) else "—"
+        lineas.append(
+            f"| {row['Categoría']} | €{row['Presupuesto Anual']:,.2f} | "
+            f"€{row['Real YTD']:,.2f} | {alcance} |"
+        )
+
+    return "\n".join(lineas) + nota, balance_ytd
+
+# Crear una tabla de Ingresos y Gastos mensuales en el Prompt Engine, para ver la evolución de cada mes del año en curso (YTD).
+
+def generar_tabla_mensual_ingresos_gastos(supabase, user_id, year):
+    """Tabla compacta: Ingresos y Gastos totales por mes (YTD)."""
+    hoy = date.today()
+    df_todos = get_todos_gastos(supabase, user_id)
+    if df_todos.empty:
+        return "_Sin datos._"
+
+    df_ytd = df_todos[
+        (df_todos["anio"] == year) &
+        (df_todos["fecha_gasto"].dt.date <= hoy)
+    ]
+    if df_ytd.empty:
+        return "_Sin datos._"
+
+    resumen = df_ytd.groupby(["mes", "tipo"])["monto"].sum().unstack(fill_value=0)
+    for col in ["Ingreso", "Gasto"]:
+        if col not in resumen.columns:
+            resumen[col] = 0.0
+
+    meses_es = {1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',
+                7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'}
+
+    lineas = ["| Mes | Ingresos | Gastos |", "|---|---|---|"]
+    for mes in sorted(resumen.index):
+        lineas.append(
+            f"| {meses_es[mes]} | €{resumen.loc[mes, 'Ingreso']:,.2f} | €{resumen.loc[mes, 'Gasto']:,.2f} |"
+        )
+
+    return "\n".join(lineas)
+
+
+
+# Replica el cálculo de KPIs de pagina_cartera() por cada cartera, más distribución por sector y últimas 10 compras: 
+
+def generar_seccion_cartera(supabase, user_id):
+    """Genera el bloque markdown de la sección 5, una por cada cartera activa."""
+    carteras = get_carteras(supabase, user_id)
+    if not carteras:
+        return "_Sin carteras registradas._"
+
+    tipo_cambio = obtener_tipo_cambio_usd_eur()  # EUR por 1 USD, o None
+
+    bloques = []
+    for c in carteras:
+        cartera_id = c["id"]
+        nombre = c["nombre"]
+        moneda = c["moneda"]
+        moneda_sym = "€" if moneda == "EUR" else "$"
+
+        df = get_cartera(supabase, user_id, cartera_id)
+        efectivo, _ = get_efectivo_actual(supabase, user_id, cartera_id)
+
+        if df.empty:
+            bloques.append(
+                f"**Cartera: {nombre}** ({moneda})\n"
+                f"- Sin posiciones activas.\n"
+                f"- Efectivo disponible: {moneda_sym}{efectivo:,.2f}"
+            )
+            continue
+
+        tickers_unicos = [
+            t for t in df["ticker"].unique()
+            if str(t).strip().lower() not in ("cash", "efectivo", "")
+        ]
+        precios_rt, _ = get_precios_yfinance(tickers_unicos)
+
+        df_kpi = df.copy()
+        df_kpi["precio_final"] = df_kpi.apply(
+            lambda row: precios_rt[row["ticker"]] if row["ticker"] in precios_rt else row["precio_actual"],
+            axis=1
+        )
+        df_kpi["posicion_actual_rt"] = df_kpi["cantidad"] * df_kpi["precio_final"]
+
+        df_compras = df_kpi[df_kpi["tipo"] == "Compra"]
+        df_ventas = df_kpi[df_kpi["tipo"] == "Venta"]
+
+        precio_medio_compra = (
+            df_compras.groupby("ticker")
+            .apply(lambda g: (g["precio_entrada"] * g["cantidad"]).sum() / g["cantidad"].sum())
+        )
+
+        coste_ventas = df_ventas.apply(
+            lambda row: row["cantidad"] * precio_medio_compra.get(row["ticker"], row["precio_entrada"]),
+            axis=1
+        ).sum()
+
+        total_invertido = df_compras["posicion_inicial"].sum() - coste_ventas
+        total_actual = df_compras["posicion_actual_rt"].sum() - df_ventas["posicion_actual_rt"].sum()
+        total_actual_con_efectivo = total_actual + efectivo
+        total_gp = total_actual - total_invertido
+        pct_gp = (total_gp / total_invertido * 100) if total_invertido != 0 else 0
+
+        conversion = ""
+        if moneda == "USD" and tipo_cambio:
+            conversion = f" (≈ €{total_actual_con_efectivo * tipo_cambio:,.2f})"
+        elif moneda == "USD":
+            conversion = " (tipo de cambio no disponible)"
+
+        # Distribución por sector (posiciones netas)
+        df_neto_c = df_compras.groupby(["ticker", "sector"]).agg(
+            cantidad_c=("cantidad", "sum"),
+            valor_actual_c=("posicion_actual_rt", "sum")
+        ).reset_index()
+        df_neto_v = df_ventas.groupby("ticker").agg(
+            cantidad_v=("cantidad", "sum"),
+            valor_actual_v=("posicion_actual_rt", "sum")
+        ).reset_index()
+        df_neto = df_neto_c.merge(df_neto_v, on="ticker", how="left").fillna(0)
+        df_neto["cantidad_neta"] = df_neto["cantidad_c"] - df_neto["cantidad_v"]
+        df_neto["valor_neto"] = df_neto["valor_actual_c"] - df_neto["valor_actual_v"]
+        df_neto = df_neto[df_neto["cantidad_neta"] > 0.0001]
+
+        sector_resumen = df_neto.groupby("sector")["valor_neto"].sum().reset_index()
+        sector_resumen["pct"] = (sector_resumen["valor_neto"] / total_actual * 100) if total_actual else 0
+        sector_resumen = sector_resumen.sort_values("pct", ascending=False)
+
+        sector_lineas = ["| Sector | % Cartera |", "|---|---|"]
+        for _, row in sector_resumen.iterrows():
+            sector_lineas.append(f"| {row['sector']} | {row['pct']:.1f}% |")
+
+        # Últimas 10 compras
+        ultimas = df_kpi[df_kpi["tipo"] == "Compra"].sort_values("fecha_operacion", ascending=False).head(10)
+        compras_lineas = ["| Fecha | Activo | Precio compra | Precio actual | % Cartera |", "|---|---|---|---|---|"]
+        for _, row in ultimas.iterrows():
+            pct_cartera = (row["posicion_actual_rt"] / total_actual_con_efectivo * 100) if total_actual_con_efectivo else 0
+            nombre_activo = row.get("nombre", row["ticker"])
+            compras_lineas.append(
+                f"| {row['fecha_operacion'].strftime('%d/%m/%Y')} | {nombre_activo} | "
+                f"{moneda_sym}{row['precio_entrada']:,.2f} | {moneda_sym}{row['precio_final']:,.2f} | "
+                f"{pct_cartera:.1f}% |"
+            )
+
+        bloque = (
+            f"**Cartera: {nombre}** ({moneda})\n"
+            f"- Efectivo disponible: {moneda_sym}{efectivo:,.2f}\n"
+            f"- Valor total (posiciones + efectivo): {moneda_sym}{total_actual_con_efectivo:,.2f}{conversion}\n"
+            f"- Invertido: {moneda_sym}{total_invertido:,.2f}\n"
+            f"- G/P: {moneda_sym}{total_gp:,.2f} ({pct_gp:.2f}%)\n\n"
+            f"Distribución por sector:\n" + "\n".join(sector_lineas) + "\n\n"
+            f"Últimas 10 compras:\n" + "\n".join(compras_lineas)
+        )
+        bloques.append(bloque)
+
+    return "\n\n".join(bloques)
+
+# ensamblamos todo con la plantilla
+
+def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=None):
+    """Ensambla el prompt completo para pegar en un LLM externo."""
+    categorias_inversion = categorias_inversion or []
+    hoy = date.today()
+    year = hoy.year
+
+    df_saldos, _ = get_saldos_actuales(supabase, user_id)
+    total_bancos = df_saldos["monto"].sum() if not df_saldos.empty else 0.0
+
+    tabla_anual, balance_ytd = generar_tabla_anual(supabase, user_id, year)
+    tabla_mensual = generar_tabla_mensual_ingresos_gastos(supabase, user_id, year)
+
+    saldo_inicial_anio = total_bancos - balance_ytd
+
+    primer_dia_anio = date(year, 1, 1)
+    primer_dia_anio_siguiente = date(year + 1, 1, 1)
+    dias_en_anio = (primer_dia_anio_siguiente - primer_dia_anio).days
+    dia_del_anio = (hoy - primer_dia_anio).days + 1
+    progreso_anio_pct = round(dia_del_anio / dias_en_anio * 100)
+
+    if categorias_inversion:
+        nota_inversion = f'_Nota: "Gastos" incluye categorías marcadas como inversión: {", ".join(categorias_inversion)}._'
+    else:
+        nota_inversion = ""
+
+    seccion_cartera = generar_seccion_cartera(supabase, user_id)
+
+    return f"""Actúa como mi asesor financiero personal. Voy a darte mi situación financiera completa. Tu trabajo es analizarla con honestidad, sin suavizar diagnósticos, y darme un plan de acción concreto.
+
+### 1. CONTEXTO
+- País: {pais}
+- Perfil de inversión: {perfil}
+- Moneda principal de gastos: €
+- Fecha del informe: {hoy.strftime('%d/%m/%Y')}
+
+### 2. SALDOS BANCARIOS
+- Total líquido: €{total_bancos:,.2f}
+
+### 3. AÑO {year}
+_Presupuesto Anual = suma de los 12 presupuestos mensuales. Real YTD = acumulado real desde el 1 de enero. % Alcance = Real YTD / Presupuesto Anual._
+
+{tabla_anual}
+
+- Saldo bancario al 1 de enero de {year} (estimado): €{saldo_inicial_anio:,.2f}
+- Balance neto acumulado en {year} (YTD): €{balance_ytd:,.2f}
+- Progreso del año: día {dia_del_anio} de {dias_en_anio} ({progreso_anio_pct}%)
+
+**Evolución mensual (Ingresos vs Gastos):**
+{nota_inversion}
+
+{tabla_mensual}
+
+### 4. CARTERA DE INVERSIÓN
+
+{seccion_cartera}
+
+### INSTRUCCIONES
+Mi perfil de inversión es {perfil} y vivo en {pais}. Con esa referencia, evalúa mis datos y responde en este orden:
+
+1. **Diagnóstico general** (máx. 5 líneas): ¿cómo está mi salud financiera este año frente a mi plan?
+2. **Gastos**: ¿qué categorías van adelantadas o atrasadas respecto al % del año transcurrido, y es motivo de preocupación o es normal?
+3. **Cartera**: ¿mi diversificación y concentración son coherentes con mi perfil de riesgo declarado? Señala desbalances si los hay.
+4. **Liquidez**: ¿tengo suficiente efectivo (banco + bróker, por moneda) para cubrir imprevistos o aprovechar oportunidades de inversión?
+5. **Plan de acción**: 3 acciones concretas para los próximos 30 días, ordenadas de mayor a menor impacto.
+
+No repitas los números que te doy — interprétalos. Si algo está mal, dilo sin rodeos."""
+
+#  UI de la Pagina Prompt Engine
+
+def pagina_prompt(supabase, user_id):
+    st.title("🤖 Prompt Maestro")
+    st.caption("Genera un resumen de tu situación financiera para analizar con ChatGPT, Gemini, Claude, etc.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        pais = st.selectbox("País", ["España", "Otro"], index=0)
+    with col2:
+        perfil = st.selectbox("Perfil de inversión", ["Conservador", "Moderado", "Agresivo"], index=1)
+
+    categorias_disponibles = get_categorias_usuario(supabase, user_id)
+    default_inversion = [c for c in categorias_disponibles if "invest" in c.lower()]
+
+    categorias_inversion = st.multiselect(
+        "¿Qué categorías representan inversiones?",
+        options=categorias_disponibles,
+        default=default_inversion,
+        help="Afecta cómo se interpreta 'Gastos' en la evolución mensual."
+    )
+
+    if st.button("🔄 Generar prompt", type="primary"):
+        with st.spinner("Generando..."):
+            try:
+                st.session_state.prompt_generado = generar_prompt_master(
+                    supabase, user_id, pais, perfil, categorias_inversion
+                )
+            except Exception as e:
+                st.error(f"❌ Error al generar el prompt: {e}")
+
+    if "prompt_generado" in st.session_state:
+        st.divider()
+        st.code(st.session_state.prompt_generado, language="markdown")
+        st.caption("📋 Pasa el cursor sobre el bloque para copiarlo.")
 
 # ── Página cartera ────────────────────────────────────────────────────────────
 
@@ -1750,8 +2156,8 @@ def main():
 
     pagina = st.sidebar.radio(
         "Ir a:",
-        ["📊 Dashboard", "📈 Histórico", "🔍 Detalle",
-         "💳 Bancos", "🔮 Proyección", "💼 Cartera", "📤 Sincronizar"],
+        ["📊 Dashboard", "📈 Histórico", "🔍 Detalle", 
+         "💳 Bancos", "🔮 Proyección", "💼 Cartera", "🤖 Prompt IA", "📤 Sincronizar"],
         index=0
     )
 
@@ -1783,6 +2189,8 @@ def main():
         pagina_sync(supabase, user_id)
     elif pagina == "💼 Cartera":
         pagina_cartera(supabase, user_id)
+    elif pagina == "🤖 Prompt IA":
+        pagina_prompt(supabase, user_id)
 
 if __name__ == "__main__":
     main()

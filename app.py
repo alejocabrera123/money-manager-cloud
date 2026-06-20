@@ -297,8 +297,8 @@ def widget_saldos_inline(supabase, user_id):
 
 CATEGORIAS_OTROS = [
     "Education", "Other", "Impuesto Bancario", "Clothing",
-    "Gifts", "Technology", "Payment", "Medical", "Tramites",
-    "Visa", "Hacienda"
+    "Gifts", "Technology", "Payment", "Medical", "Tramites Visa",
+    "Hacienda"
 ]
 
 def pagina_dashboard(supabase, user_id):
@@ -1599,9 +1599,14 @@ def generar_tabla_anual(supabase, user_id, year):
         return row["Real YTD"] / row["Presupuesto Anual"] * 100
 
     df_final["% Alcance"] = df_final.apply(calc_alcance, axis=1)
-    df_final = df_final.reindex(
-        df_final["Real YTD"].abs().sort_values(ascending=False).index
+
+    mask_otras = df_final["Categoría"] == "Otras Categorías"
+    df_otras_fila = df_final[mask_otras]
+    df_sin_otras = df_final[~mask_otras]
+    df_sin_otras = df_sin_otras.reindex(
+        df_sin_otras["Real YTD"].abs().sort_values(ascending=False).index
     )
+    df_final = pd.concat([df_sin_otras, df_otras_fila], ignore_index=True)
 
     lineas = ["| Categoría | Presupuesto Anual | Real YTD | % Alcance | Desvío |", "|---|---|---|---|---|"]
     for _, row in df_final.iterrows():
@@ -1660,7 +1665,14 @@ def generar_tabla_mensual_ingresos_gastos(supabase, user_id, year, categorias_in
             ing = df_ingresos.get(mes, 0.0)
             gas = df_gastos_base.get(mes, 0.0)
             inv = df_inversion.get(mes, 0.0)
-            tasa = f"{(ing - gas - inv) / ing * 100:.0f}%" if ing > 0 else "—"
+
+            if year == hoy.year and mes == hoy.month:
+                tasa = "⏳ Mes en curso"
+            elif ing == 0:
+                tasa = "— sin ingresos"
+            else:
+                tasa = f"{(ing - gas - inv) / ing * 100:.0f}%"
+            
             lineas.append(
                 f"| {meses_es[mes]} | €{ing:,.2f} | €{gas:,.2f} | €{inv:,.2f} | {tasa} |"
             )
@@ -1669,7 +1681,14 @@ def generar_tabla_mensual_ingresos_gastos(supabase, user_id, year, categorias_in
         for mes in sorted(df_ytd["mes"].unique()):
             ing = df_ingresos.get(mes, 0.0)
             gas = df_gastos_base.get(mes, 0.0)
-            tasa = f"{(ing - gas) / ing * 100:.0f}%" if ing > 0 else "—"
+
+            if year == hoy.year and mes == hoy.month:
+                tasa = "⏳ Mes en curso"
+            elif ing == 0:
+                tasa = "— sin ingresos"
+            else:
+                tasa = f"{(ing - gas) / ing * 100:.0f}%"
+            
             lineas.append(
                 f"| {meses_es[mes]} | €{ing:,.2f} | €{gas:,.2f} | {tasa} |"
             )
@@ -1851,6 +1870,60 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
 
     seccion_cartera = generar_seccion_cartera(supabase, user_id)
 
+    # Calcular patrimonio total estimado en EUR para sección 2
+    tipo_cambio = obtener_tipo_cambio_usd_eur()
+    lineas_patrimonio = [f"- Liquidez bancaria: €{total_bancos:,.2f}"]
+    patrimonio_eur = total_bancos
+
+    carteras = get_carteras(supabase, user_id)
+    for c in carteras:
+        cartera_id = c["id"]
+        moneda = c["moneda"]
+        moneda_sym = "€" if moneda == "EUR" else "$"
+        df_c = get_cartera(supabase, user_id, cartera_id)
+        efectivo_c, _ = get_efectivo_actual(supabase, user_id, cartera_id)
+
+        if df_c.empty:
+            valor_total = efectivo_c
+        else:
+            tickers_unicos = [t for t in df_c["ticker"].unique()
+                              if str(t).strip().lower() not in ("cash", "efectivo", "")]
+            precios_rt, _ = get_precios_yfinance(tickers_unicos)
+            df_c["precio_final"] = df_c.apply(
+                lambda row: precios_rt[row["ticker"]] if row["ticker"] in precios_rt else row["precio_actual"],
+                axis=1
+            )
+            df_c["posicion_actual_rt"] = df_c["cantidad"] * df_c["precio_final"]
+            df_compras_c = df_c[df_c["tipo"] == "Compra"]
+            df_ventas_c = df_c[df_c["tipo"] == "Venta"]
+            total_actual_c = df_compras_c["posicion_actual_rt"].sum() - df_ventas_c["posicion_actual_rt"].sum()
+            valor_total = total_actual_c + efectivo_c
+
+        if moneda == "EUR":
+            lineas_patrimonio.append(f"- Cartera {c['nombre']} (EUR): €{valor_total:,.2f}")
+            patrimonio_eur += valor_total
+        else:
+            if tipo_cambio:
+                valor_eur = valor_total * tipo_cambio
+                lineas_patrimonio.append(
+                    f"- Cartera {c['nombre']} (USD): ${valor_total:,.2f} (≈ €{valor_eur:,.2f} al tipo de cambio actual)"
+                )
+                patrimonio_eur += valor_eur
+            else:
+                lineas_patrimonio.append(
+                    f"- Cartera {c['nombre']} (USD): ${valor_total:,.2f} (tipo de cambio no disponible)"
+                )
+
+    lineas_patrimonio.append(f"- Patrimonio total estimado: ≈ €{patrimonio_eur:,.2f}")
+    if linea_cobertura:
+        lineas_patrimonio.append(linea_cobertura)
+    if deuda_importe > 0:
+        lineas_patrimonio.append(
+            f"- Deuda pendiente: €{deuda_importe:,.0f} — cuota €{deuda_cuota:,.0f}/mes hasta {deuda_fecha_fin}. "
+            f"El efectivo bancario cubre parcialmente esta obligación y no debe considerarse caja libre para inversión."
+        )
+    bloque_patrimonio = "\n".join(lineas_patrimonio)
+
     return f"""Actúa como mi asesor financiero personal. Voy a darte mi situación financiera completa. Tu trabajo es analizarla con honestidad, sin suavizar diagnósticos, y darme un plan de acción concreto.
 
 ### 1. CONTEXTO
@@ -1860,13 +1933,11 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
 - Fecha del informe: {hoy.strftime('%d/%m/%Y')}
 {f"- Contexto estratégico: {contexto_estrategico}" if contexto_estrategico.strip() else ""}
 
-### 2. SALDOS BANCARIOS
-- Total líquido: €{total_bancos:,.2f}
-{linea_cobertura}
-{(f"- Deuda pendiente: €{deuda_importe:,.0f} — cuota €{deuda_cuota:,.0f}/mes hasta {deuda_fecha_fin}. El efectivo bancario cubre parcialmente esta obligación y no debe considerarse caja libre para inversión.") if deuda_importe > 0 else ""}
+### 2. PATRIMONIO NETO ESTIMADO
+{bloque_patrimonio}
 
-### 3. AÑO {year}
-- Presupuesto Anual = suma de los 12 presupuestos mensuales. Real YTD = acumulado real desde el 1 de enero. % Alcance = Real YTD / Presupuesto Anual._
+### 3. FLUJO DEL AÑO {year}
+- Presupuesto Anual = suma de los 12 presupuestos mensuales. Real YTD = acumulado real desde el 1 de enero. % Alcance = Real YTD / Presupuesto Anual.
 
 {tabla_anual}
 
@@ -1878,8 +1949,7 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
 
 {tabla_mensual}
 
-### 4. CARTERA DE INVERSIÓN
-
+### 4. CARTERA — DETALLE
 {seccion_cartera}
 
 ### INSTRUCCIONES

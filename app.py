@@ -336,91 +336,111 @@ def pagina_dashboard(supabase, user_id):
 
     if df_gastos.empty and df_presupuestos.empty:
         st.warning("No hay datos para este mes.")
+    else:
+        if not df_gastos.empty:
+            df_gastos["importe"] = df_gastos.apply(
+                lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
+            )
+            total_ingresos = df_gastos[df_gastos["tipo"] == "Ingreso"]["monto"].sum()
+            total_gastado = df_gastos[df_gastos["tipo"] == "Gasto"]["monto"].sum()
+            balance = total_ingresos - total_gastado
+        else:
+            total_ingresos = total_gastado = balance = 0
+
+        presupuesto_total = df_presupuestos["monto"].sum() if not df_presupuestos.empty else 0
+
+        st.divider()
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("💸 Total Gastado", f"€{total_gastado:,.2f}")
+        k2.metric("💰 Total Ingresos", f"€{total_ingresos:,.2f}")
+        k3.metric("⚖️ Balance", f"€{balance:,.2f}")
+        k4.metric("🎯 Presupuesto Neto", f"€{presupuesto_total:,.2f}")
+
+    # ── Gráficos históricos ───────────────────────────────────────────────────
+    st.divider()
+    with st.spinner("Cargando histórico..."):
+        df = get_todos_gastos(supabase, user_id)
+
+    if df.empty:
         return
 
-    if not df_gastos.empty:
-        df_gastos["importe"] = df_gastos.apply(
-            lambda r: r["monto"] if r["tipo"] == "Ingreso" else -r["monto"], axis=1
-        )
-        total_ingresos = df_gastos[df_gastos["tipo"] == "Ingreso"]["monto"].sum()
-        total_gastado = df_gastos[df_gastos["tipo"] == "Gasto"]["monto"].sum()
-        balance = total_ingresos - total_gastado
-    else:
-        total_ingresos = total_gastado = balance = 0
+    anios_disponibles = sorted(df["anio"].unique(), reverse=True)
 
-    presupuesto_total = df_presupuestos["monto"].sum() if not df_presupuestos.empty else 0
+    st.subheader("📊 Ingresos vs Gastos por Mes")
+    anio_sel = st.selectbox("Año", anios_disponibles, index=0, key="anio_barras")
 
-    st.divider()
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("💸 Total Gastado", f"€{total_gastado:,.2f}")
-    k2.metric("💰 Total Ingresos", f"€{total_ingresos:,.2f}")
-    k3.metric("⚖️ Balance", f"€{balance:,.2f}")
-    k4.metric("🎯 Presupuesto Neto", f"€{presupuesto_total:,.2f}")
+    df_anio = df[df["anio"] == anio_sel].copy()
+    meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
 
-    st.divider()
-    st.subheader("📊 Detalle por Categoría")
-    ocultar_cero = st.toggle("Ocultar categorías sin presupuesto (€0)", value=False)
+    df_barras = df_anio.groupby(["mes", "tipo"])["monto"].sum().reset_index()
+    df_barras["mes_nombre"] = df_barras["mes"].map(meses_nombres)
+    df_barras = df_barras.sort_values("mes")
 
-    if not df_gastos.empty:
-        real_cat = df_gastos.groupby("categoria_consumo")["importe"].sum().reset_index()
-        real_cat.columns = ["categoria_consumo", "real"]
-    else:
-        real_cat = pd.DataFrame(columns=["categoria_consumo", "real"])
-
-    if not df_presupuestos.empty:
-        df_tabla = pd.merge(df_presupuestos, real_cat, on="categoria_consumo", how="left")
-        df_tabla["real"] = df_tabla["real"].fillna(0)
-    else:
-        df_tabla = real_cat.copy()
-        df_tabla["monto"] = 0
-
-    df_tabla.columns = ["Categoría", "Presupuesto", "Real"]
-    df_tabla["Diferencia"] = df_tabla["Real"] - df_tabla["Presupuesto"]
-
-    def semaforo(row):
-        if row["Real"] == 0 and row["Presupuesto"] != 0:
-            return "🟡"
-        elif row["Presupuesto"] < 0 and row["Real"] < row["Presupuesto"]:
-            return "🔴"
-        elif row["Presupuesto"] > 0 and row["Real"] < row["Presupuesto"]:
-            return "🔴"
-        else:
-            return "🟢"
-
-    df_tabla["Estado"] = df_tabla.apply(semaforo, axis=1)
-
-    mask_otros = df_tabla["Categoría"].isin(CATEGORIAS_OTROS)
-    df_principales = df_tabla[~mask_otros].copy()
-    df_otros = df_tabla[mask_otros].copy()
-
-    if ocultar_cero:
-        df_principales = df_principales[df_principales["Presupuesto"] != 0]
-
-    df_principales = df_principales.reindex(
-        df_principales["Real"].abs().sort_values(ascending=False).index
+    fig_barras = px.bar(
+        df_barras, x="mes_nombre", y="monto", color="tipo", barmode="group",
+        color_discrete_map={"Ingreso": "#82c9a0", "Gasto": "#e8968a"},
+        labels={"monto": "€", "mes_nombre": "Mes", "tipo": ""},
+        title=f"Ingresos vs Gastos — {anio_sel}"
     )
+    fig_barras.update_layout(legend_title_text="")
+    st.plotly_chart(fig_barras, use_container_width=True)
 
-    if not df_otros.empty:
-        fila_otros = pd.DataFrame([{
-            "Categoría": "Otras Categorías ℹ️",
-            "Presupuesto": df_otros["Presupuesto"].sum(),
-            "Real": df_otros["Real"].sum(),
-            "Diferencia": df_otros["Diferencia"].sum(),
-            "Estado": "—"
-        }])
-        df_final = pd.concat([df_principales, fila_otros], ignore_index=True)
+    st.divider()
+    st.subheader("📈 Balance")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        vista_balance = st.radio(
+            "Vista",
+            ["Cascada mensual", "Balance mensual", "Balance acumulado"],
+            horizontal=True
+        )
+    anios_rango = sorted(df["anio"].unique())
+    with col2:
+        anio_desde = st.selectbox("Desde año", anios_rango, index=0, key="desde_anio")
+    with col3:
+        anio_hasta = st.selectbox("Hasta año", anios_rango,
+                                   index=len(anios_rango)-1, key="hasta_anio")
+
+    df_rango = df[(df["anio"] >= anio_desde) & (df["anio"] <= anio_hasta)].copy()
+    df_bal = df_rango.groupby("mes_anio")["importe"].sum().reset_index()
+    df_bal = df_bal.sort_values("mes_anio")
+    df_bal["etiqueta"] = df_bal["mes_anio"].astype(str)
+    df_bal["acumulado"] = df_bal["importe"].cumsum()
+
+    if vista_balance == "Cascada mensual":
+        fig = go.Figure(go.Waterfall(
+            orientation="v", measure=["relative"] * len(df_bal),
+            x=df_bal["etiqueta"], y=df_bal["importe"],
+            connector={"line": {"color": "rgba(150,150,150,0.3)"}},
+            increasing={"marker": {"color": "#82c9a0"}},
+            decreasing={"marker": {"color": "#e8968a"}},
+            hovertemplate="%{x}<br>Δ mes: €%{y:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(title="Cascada de balance mensual",
+                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
+    elif vista_balance == "Balance mensual":
+        fig = go.Figure(go.Bar(
+            x=df_bal["etiqueta"], y=df_bal["importe"],
+            marker_color=["#82c9a0" if v >= 0 else "#e8968a" for v in df_bal["importe"]],
+            hovertemplate="%{x}<br>Balance: €%{y:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(title="Balance neto por mes",
+                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
     else:
-        df_final = df_principales
+        fig = go.Figure(go.Scatter(
+            x=df_bal["etiqueta"], y=df_bal["acumulado"],
+            mode="lines+markers",
+            line=dict(color="#3498db", width=2.5), marker=dict(size=6),
+            hovertemplate="%{x}<br>Acumulado: €%{y:,.2f}<extra></extra>"
+        ))
+        fig.update_layout(title="Balance acumulado",
+                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
 
-    df_mostrar = df_final.copy()
-    df_mostrar["Presupuesto"] = df_mostrar["Presupuesto"].apply(lambda x: f"€{x:,.2f}")
-    df_mostrar["Real"] = df_mostrar["Real"].apply(lambda x: f"€{x:,.2f}")
-    df_mostrar["Diferencia"] = df_mostrar["Diferencia"].apply(lambda x: f"€{x:,.2f}")
-    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
-
-    if not df_otros.empty:
-        cats_lista = ", ".join(sorted(df_otros["Categoría"].tolist()))
-        st.caption(f"ℹ️ Otras Categorías incluye: {cats_lista}")
+    st.plotly_chart(fig, use_container_width=True)
 
 def pagina_bancos(supabase, user_id):
     st.title("💳 Saldos Bancarios")
@@ -509,94 +529,6 @@ def pagina_bancos(supabase, user_id):
             st.dataframe(df_fecha, use_container_width=True, hide_index=True)
         else:
             st.info("Sin historial disponible")
-
-def pagina_historico(supabase, user_id):
-    st.title("📈 Histórico")
-
-    with st.spinner("Cargando datos históricos..."):
-        df = get_todos_gastos(supabase, user_id)
-
-    if df.empty:
-        st.warning("No hay datos disponibles.")
-        return
-
-    anios_disponibles = sorted(df["anio"].unique(), reverse=True)
-
-    st.subheader("📊 Ingresos vs Gastos por Mes")
-    anio_sel = st.selectbox("Año", anios_disponibles, index=0, key="anio_barras")
-
-    df_anio = df[df["anio"] == anio_sel].copy()
-    meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
-                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
-
-    df_barras = df_anio.groupby(["mes", "tipo"])["monto"].sum().reset_index()
-    df_barras["mes_nombre"] = df_barras["mes"].map(meses_nombres)
-    df_barras = df_barras.sort_values("mes")
-
-    fig_barras = px.bar(
-        df_barras, x="mes_nombre", y="monto", color="tipo", barmode="group",
-        color_discrete_map={"Ingreso": "#82c9a0", "Gasto": "#e8968a"},
-        labels={"monto": "€", "mes_nombre": "Mes", "tipo": ""},
-        title=f"Ingresos vs Gastos — {anio_sel}"
-    )
-    fig_barras.update_layout(legend_title_text="")
-    st.plotly_chart(fig_barras, use_container_width=True)
-
-    st.divider()
-    st.subheader("📈 Balance")
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        vista_balance = st.radio(
-            "Vista",
-            ["Cascada mensual", "Balance mensual", "Balance acumulado"],
-            horizontal=True
-        )
-    anios_rango = sorted(df["anio"].unique())
-    with col2:
-        anio_desde = st.selectbox("Desde año", anios_rango, index=0, key="desde_anio")
-    with col3:
-        anio_hasta = st.selectbox("Hasta año", anios_rango,
-                                   index=len(anios_rango)-1, key="hasta_anio")
-
-    df_rango = df[(df["anio"] >= anio_desde) & (df["anio"] <= anio_hasta)].copy()
-    df_bal = df_rango.groupby("mes_anio")["importe"].sum().reset_index()
-    df_bal = df_bal.sort_values("mes_anio")
-    df_bal["etiqueta"] = df_bal["mes_anio"].astype(str)
-    df_bal["acumulado"] = df_bal["importe"].cumsum()
-
-    if vista_balance == "Cascada mensual":
-        fig = go.Figure(go.Waterfall(
-            orientation="v", measure=["relative"] * len(df_bal),
-            x=df_bal["etiqueta"], y=df_bal["importe"],
-            connector={"line": {"color": "rgba(150,150,150,0.3)"}},
-            increasing={"marker": {"color": "#82c9a0"}},
-            decreasing={"marker": {"color": "#e8968a"}},
-            hovertemplate="%{x}<br>Δ mes: €%{y:,.2f}<extra></extra>"
-        ))
-        fig.update_layout(title="Cascada de balance mensual",
-                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
-    elif vista_balance == "Balance mensual":
-        fig = go.Figure(go.Bar(
-            x=df_bal["etiqueta"], y=df_bal["importe"],
-            marker_color=["#82c9a0" if v >= 0 else "#e8968a" for v in df_bal["importe"]],
-            hovertemplate="%{x}<br>Balance: €%{y:,.2f}<extra></extra>"
-        ))
-        fig.update_layout(title="Balance neto por mes",
-                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-    else:
-        fig = go.Figure(go.Scatter(
-            x=df_bal["etiqueta"], y=df_bal["acumulado"],
-            mode="lines+markers",
-            line=dict(color="#3498db", width=2.5), marker=dict(size=6),
-            hovertemplate="%{x}<br>Acumulado: €%{y:,.2f}<extra></extra>"
-        ))
-        fig.update_layout(title="Balance acumulado",
-                          xaxis_title="Mes", yaxis_title="€", showlegend=False)
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-
-    st.plotly_chart(fig, use_container_width=True)
 
 def pagina_detalle(supabase, user_id):
     st.title("🔍 Detalle de Transacciones")
@@ -1963,8 +1895,243 @@ Mi perfil de inversión es {perfil} y vivo en {pais}. Con esa referencia, evalú
 
 No repitas los números que te doy — interprétalos. Si algo está mal, dilo sin rodeos."""
 
-#  UI de la Pagina Prompt Engine
+# Nueva función para generar la tabla presupuesto vs gasto real del año en curso (YTD).
+def generar_tabla_presupuesto_anual(supabase, user_id, year):
+    """Tabla presupuesto estilo Excel: categorías × 12 meses, 2 sub-filas (Gasto / Presupuesto).
+    Fila de totales al pie: Presupuesto total / Total gastado / % Ejecución.
+    Columna Total anual al final. Otras Categorías agregadas al final.
+    Usuarios sin presupuesto: solo fila Gasto, sin color condicional."""
 
+    hoy = date.today()
+    meses_nombres = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+    meses = list(range(1, 13))
+
+    df_todos = get_todos_gastos(supabase, user_id)
+    if not df_todos.empty:
+        df_anio = df_todos[df_todos["anio"] == year].copy()
+        pivot_real = (
+            df_anio.groupby(["categoria_consumo", "mes"])["importe"]
+            .sum()
+            .unstack(level="mes")
+            .reindex(columns=meses, fill_value=0)
+            .fillna(0)
+        )
+    else:
+        pivot_real = pd.DataFrame()
+
+    inicio = date(year, 1, 1)
+    fin = date(year + 1, 1, 1)
+    result = supabase.table("presupuestos")\
+        .select("categoria_consumo, fecha, monto")\
+        .eq("user_id", user_id)\
+        .gte("fecha", str(inicio))\
+        .lt("fecha", str(fin))\
+        .execute()
+
+    tiene_presupuesto = bool(result.data)
+
+    if tiene_presupuesto:
+        df_presup = pd.DataFrame(result.data)
+        df_presup["mes"] = pd.to_datetime(df_presup["fecha"]).dt.month
+        pivot_presup = (
+            df_presup.groupby(["categoria_consumo", "mes"])["monto"]
+            .sum()
+            .unstack(level="mes")
+            .reindex(columns=meses, fill_value=0)
+            .fillna(0)
+        )
+    else:
+        pivot_presup = pd.DataFrame()
+
+    cats_real = set(pivot_real.index.tolist()) if not pivot_real.empty else set()
+    cats_presup = set(pivot_presup.index.tolist()) if not pivot_presup.empty else set()
+    todas_cats = cats_real | cats_presup
+
+    cats_principales = sorted([c for c in todas_cats if c not in CATEGORIAS_OTROS])
+    cats_otros = sorted([c for c in todas_cats if c in CATEGORIAS_OTROS])
+
+    if not pivot_real.empty:
+        totales_abs = {
+            c: abs(pivot_real.loc[c].sum()) if c in pivot_real.index else 0
+            for c in cats_principales
+        }
+        cats_principales = sorted(cats_principales,
+                                   key=lambda c: totales_abs.get(c, 0), reverse=True)
+
+    cats_ordenadas = cats_principales + (["Otras Categorías"] if cats_otros else [])
+
+    col_nombres = [meses_nombres[m] for m in meses] + ["Total"]
+
+    # Índice plano desde el principio
+    index_plano = []
+    datos_df = []
+
+    for cat in cats_ordenadas:
+        if cat == "Otras Categorías":
+            gasto_row = pd.Series(0.0, index=meses)
+            presup_row = pd.Series(0.0, index=meses)
+            for c in cats_otros:
+                if not pivot_real.empty and c in pivot_real.index:
+                    gasto_row = gasto_row.add(pivot_real.loc[c], fill_value=0)
+                if tiene_presupuesto and not pivot_presup.empty and c in pivot_presup.index:
+                    presup_row = presup_row.add(pivot_presup.loc[c], fill_value=0)
+        else:
+            gasto_row = pivot_real.loc[cat] if (not pivot_real.empty and cat in pivot_real.index) else pd.Series(0.0, index=meses)
+            presup_row = pivot_presup.loc[cat] if (tiene_presupuesto and not pivot_presup.empty and cat in pivot_presup.index) else pd.Series(0.0, index=meses)
+
+        gasto_vals = [gasto_row.get(m, 0.0) for m in meses]
+        presup_vals = [presup_row.get(m, 0.0) for m in meses]
+        gasto_total = sum(gasto_vals)
+        presup_total = sum(presup_vals)
+
+        index_plano.append(f"{cat} · Gasto")
+        datos_df.append(gasto_vals + [gasto_total])
+
+        if tiene_presupuesto:
+            index_plano.append(f"{cat} · Presupuesto")
+            datos_df.append(presup_vals + [presup_total])
+
+    # Filas de totales
+    totales_presup = [0.0] * 13
+    totales_gasto = [0.0] * 13
+    for idx, vals in zip(index_plano, datos_df):
+        if "· Gasto" in idx:
+            for i, v in enumerate(vals):
+                totales_gasto[i] += v
+        elif "· Presupuesto" in idx:
+            for i, v in enumerate(vals):
+                totales_presup[i] += v
+
+    if tiene_presupuesto:
+        pct_row = [
+            (totales_gasto[i] / totales_presup[i] * 100)
+            if totales_presup[i] != 0 else None
+            for i in range(13)
+        ]
+        index_plano += ["— Presupuesto total", "— Total gastado", "— % Ejecución"]
+        datos_df += [totales_presup, totales_gasto, pct_row]
+
+    df_tabla = pd.DataFrame(datos_df, index=index_plano, columns=col_nombres)
+
+    # Formato
+    def fmt_celda(val, es_pct=False):
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return "—"
+        if es_pct:
+            return f"{val:.0f}%"
+        if val == 0:
+            return ""
+        return f"€{val:,.0f}"
+
+    df_fmt = df_tabla.copy().astype(object)
+    for idx in df_tabla.index:
+        es_pct = idx == "— % Ejecución"
+        for col in col_nombres:
+            df_fmt.loc[idx, col] = fmt_celda(df_tabla.loc[idx, col], es_pct=es_pct)
+
+    # Estilos
+    cats_unicas = list(dict.fromkeys([
+        idx.rsplit(" · ", 1)[0] if " · " in idx else idx
+        for idx in index_plano
+    ]))
+
+    def aplicar_estilos(df_styler):
+        styles = pd.DataFrame("", index=df_fmt.index, columns=df_fmt.columns)
+
+        # Alternancia gris/blanco por categoría
+        for i, cat in enumerate(cats_unicas):
+            if cat.startswith("—"):
+                continue
+            bg = "background-color: #f7f9fc" if i % 2 == 0 else "background-color: #ffffff"
+            for sufijo in (["· Gasto", "· Presupuesto"] if tiene_presupuesto else ["· Gasto"]):
+                idx = f"{cat} {sufijo}"
+                if idx in styles.index:
+                    styles.loc[idx, :] = bg
+
+        # Color verde/rojo en filas de Gasto
+        if tiene_presupuesto:
+            for cat in cats_unicas:
+                if cat.startswith("—"):
+                    continue
+                idx_gasto = f"{cat} · Gasto"
+                idx_presup = f"{cat} · Presupuesto"
+                if idx_gasto not in df_tabla.index or idx_presup not in df_tabla.index:
+                    continue
+                for col in col_nombres:
+                    gasto = df_tabla.loc[idx_gasto, col]
+                    presup = df_tabla.loc[idx_presup, col]
+                    if gasto == 0 and presup == 0:
+                        continue
+                    if presup != 0:
+                        if (presup > 0 and gasto >= presup) or (presup < 0 and gasto >= presup):
+                            styles.loc[idx_gasto, col] += "; color: #1aa64a; font-weight: 700"
+                        else:
+                            styles.loc[idx_gasto, col] += "; color: #e04b4b; font-weight: 700"
+
+        # Color % Ejecución
+        if tiene_presupuesto:
+            for col in col_nombres:
+                val = df_tabla.loc["— % Ejecución", col]
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    color = "#1aa64a" if val <= 100 else "#e04b4b"
+                    styles.loc["— % Ejecución", col] = f"color: {color}; font-weight: 800"
+
+        # Negrita filas totales
+        if tiene_presupuesto:
+            for idx in ["— Presupuesto total", "— Total gastado", "— % Ejecución"]:
+                if idx in styles.index:
+                    styles.loc[idx, :] += "; font-weight: 800; background-color: #eaf1fb"
+
+        return df_styler.apply(lambda _: styles, axis=None)
+
+    styled = df_fmt.style.pipe(aplicar_estilos)
+    return styled, tiene_presupuesto
+
+# Pagina: pagina de presupuesto
+def pagina_presupuesto(supabase, user_id):
+    st.title("📋 Presupuesto")
+
+    with st.spinner("Cargando datos..."):
+        df_todos = get_todos_gastos(supabase, user_id)
+
+    if df_todos.empty:
+        st.warning("No hay datos disponibles.")
+        return
+
+    anios_disponibles = sorted(df_todos["anio"].unique(), reverse=True)
+    anio_default_idx = (
+        anios_disponibles.index(date.today().year)
+        if date.today().year in anios_disponibles else 0
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        year = st.selectbox("Año", anios_disponibles, index=anio_default_idx)
+
+    st.divider()
+
+    with st.spinner("Construyendo tabla..."):
+        styled, tiene_presupuesto = generar_tabla_presupuesto_anual(supabase, user_id, year)
+
+    if not tiene_presupuesto:
+        st.info("Sin presupuesto configurado para este año — mostrando solo gastos reales.")
+
+    n_cats = len([c for c in df_todos["categoria_consumo"].unique()
+                  if c not in CATEGORIAS_OTROS])
+    paso = 2 if tiene_presupuesto else 1
+    altura = (n_cats + 1) * paso * 35 + 120
+
+    st.dataframe(styled, use_container_width=True, height=altura, hide_index=False)
+
+    st.caption(
+        "🟢 Verde = dentro del presupuesto · "
+        "🔴 Rojo = supera el presupuesto · "
+        "Celdas vacías = sin movimiento ese mes"
+    )
+
+
+#  UI de la Pagina Prompt Engine
 def pagina_prompt(supabase, user_id):
     st.title("🤖 Prompt Maestro")
     st.caption("Genera un resumen de tu situación financiera para analizar con ChatGPT, Gemini, Claude, etc.")
@@ -2327,7 +2494,7 @@ def main():
 
     pagina = st.sidebar.radio(
         "Ir a:",
-        ["📊 Dashboard", "📈 Histórico", "🔍 Detalle", 
+        ["📊 Dashboard", "📋 Presupuesto", "🔍 Detalle",
          "💳 Bancos", "🔮 Proyección", "💼 Cartera", "🤖 Prompt IA", "📤 Sincronizar"],
         index=0
     )
@@ -2348,8 +2515,8 @@ def main():
 
     if pagina == "📊 Dashboard":
         pagina_dashboard(supabase, user_id)
-    elif pagina == "📈 Histórico":
-        pagina_historico(supabase, user_id)
+    elif pagina == "📋 Presupuesto":
+        pagina_presupuesto(supabase, user_id)
     elif pagina == "🔍 Detalle":
         pagina_detalle(supabase, user_id)
     elif pagina == "💳 Bancos":

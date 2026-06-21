@@ -295,11 +295,40 @@ def widget_saldos_inline(supabase, user_id):
             st.success("✅ Saldos guardados correctamente")
             st.rerun()
 
-CATEGORIAS_OTROS = [
-    "Education", "Other", "Impuesto Bancario", "Clothing",
-    "Gifts", "Technology", "Payment", "Medical", "Tramites Visa",
-    "Hacienda"
-]
+# Agrupar otras categorías
+CATEGORIAS_OTROS_DEFAULT = []  # cada usuario configura las suyas desde ⚙️ Configuración
+
+@st.cache_data(ttl=300)
+def get_user_preferences(_supabase, user_id):
+    """Carga preferencias del usuario desde Supabase. Devuelve dict con defaults si no existe fila."""
+    result = _supabase.table("user_preferences")\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .execute()
+    if result.data:
+        return result.data[0]
+    return {
+        "pais": "España",
+        "perfil_inversion": "Moderado",
+        "categorias_inversion": [],
+        "tiene_deudas": False,
+        "deuda_importe": 0,
+        "deuda_cuota": 0,
+        "deuda_fecha_fin": "",
+        "contexto_estrategico": "",
+        "categorias_otros": [],
+        "cuenta_personal": "Euros",
+    }
+
+# Identifica que "Cuenta" del XLSX debe subirse a la APP Money Magnet, y en la siguiente subida lo tendrá pre seleccionado
+def save_user_preferences(supabase, user_id, prefs: dict):
+    """UPSERT de preferencias. Invalida cache tras guardar."""
+    prefs["user_id"] = user_id
+    prefs["updated_at"] = str(datetime.now())
+    supabase.table("user_preferences")\
+        .upsert(prefs, on_conflict="user_id")\
+        .execute()
+    get_user_preferences.clear()
 
 def pagina_dashboard(supabase, user_id):
     st.title("💰 Money Magnet")
@@ -1479,7 +1508,8 @@ def generar_tabla_anual(supabase, user_id, year):
         balance_ytd = 0.0
 
     df_presup_anio = get_presupuestos_anio(supabase, year, user_id)
-    mask_otros_real = real_ytd["categoria_consumo"].isin(CATEGORIAS_OTROS)
+    mask_otros_real = real_ytd["categoria_consumo"].isin(st.session_state.get("categorias_otros", []))
+
 
     if df_presup_anio.empty:
         # ── Sin presupuesto (ej. Alicia): solo reales YTD ──
@@ -1508,7 +1538,7 @@ def generar_tabla_anual(supabase, user_id, year):
     df_tabla = pd.merge(df_presup_anio, real_ytd, on="categoria_consumo", how="outer").fillna(0)
     df_tabla.columns = ["Categoría", "Presupuesto Anual", "Real YTD"]
 
-    mask_otros = df_tabla["Categoría"].isin(CATEGORIAS_OTROS)
+    mask_otros = df_tabla["Categoría"].isin(st.session_state.get("categorias_otros", []))
     df_principales = df_tabla[~mask_otros].copy()
     df_otros = df_tabla[mask_otros].copy()
 
@@ -1948,8 +1978,8 @@ def generar_tabla_presupuesto_anual(supabase, user_id, year):
     cats_presup = set(pivot_presup.index.tolist()) if not pivot_presup.empty else set()
     todas_cats = cats_real | cats_presup
 
-    cats_principales = sorted([c for c in todas_cats if c not in CATEGORIAS_OTROS])
-    cats_otros = sorted([c for c in todas_cats if c in CATEGORIAS_OTROS])
+    cats_principales = sorted([c for c in todas_cats if c not in st.session_state.get("categorias_otros", [])])
+    cats_otros = sorted([c for c in todas_cats if c in st.session_state.get("categorias_otros", [])])
 
     if not pivot_real.empty:
         totales_abs = {
@@ -2118,7 +2148,7 @@ def pagina_presupuesto(supabase, user_id):
         st.info("Sin presupuesto configurado para este año — mostrando solo gastos reales.")
 
     n_cats = len([c for c in df_todos["categoria_consumo"].unique()
-                  if c not in CATEGORIAS_OTROS])
+              if c not in st.session_state.get("categorias_otros", [])])
     paso = 2 if tiene_presupuesto else 1
     altura = (n_cats + 1) * paso * 35 + 120
 
@@ -2130,24 +2160,144 @@ def pagina_presupuesto(supabase, user_id):
         "Celdas vacías = sin movimiento ese mes"
     )
 
+# ── Página configuración ──────────────────────────────────────────────────────
+
+def pagina_configuracion(supabase, user_id):
+    st.title("⚙️ Configuración")
+    st.caption("Personaliza Money Magnet según tus preferencias.")
+
+    prefs = get_user_preferences(supabase, user_id)
+
+    # ── Sección A: Preferencias Prompt IA ────────────────────────────────────
+    st.subheader("🤖 Preferencias Prompt IA")
+
+    paises = ["España", "Otro"]
+    pais_idx = paises.index(prefs["pais"]) if prefs["pais"] in paises else 0
+    perfiles = ["Conservador", "Moderado-conservador", "Moderado", "Moderado-agresivo", "Agresivo"]
+    perfil_idx = perfiles.index(prefs["perfil_inversion"]) if prefs["perfil_inversion"] in perfiles else 2
+
+    col1, col2 = st.columns(2)
+    with col1:
+        pais = st.selectbox("País", paises, index=pais_idx, key="cfg_pais")
+    with col2:
+        perfil = st.selectbox("Perfil de inversión", perfiles, index=perfil_idx, key="cfg_perfil")
+
+    categorias_disponibles = get_categorias_usuario(supabase, user_id)
+    default_inversion = [c for c in (prefs["categorias_inversion"] or [])
+                         if c in categorias_disponibles]
+    if not default_inversion:
+        default_inversion = [c for c in categorias_disponibles if "invest" in c.lower()]
+
+    categorias_inversion = st.multiselect(
+        "¿Qué categorías representan inversiones?",
+        options=categorias_disponibles,
+        default=default_inversion,
+        help="Afecta cómo se interpreta 'Gastos' en la evolución mensual.",
+        key="cfg_cats_inversion"
+    )
+
+    deudas_idx = 1 if prefs.get("tiene_deudas") else 0
+    tiene_deudas = st.radio("¿Tienes deudas relevantes?", ["No", "Sí"],
+                             index=deudas_idx, horizontal=True, key="cfg_deudas")
+    if tiene_deudas == "Sí":
+        col_d1, col_d2, col_d3 = st.columns(3)
+        with col_d1:
+            deuda_importe = st.number_input("Importe total (€)", min_value=0, step=100,
+                                             value=int(prefs.get("deuda_importe") or 0),
+                                             key="cfg_deuda_importe")
+        with col_d2:
+            deuda_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50,
+                                           value=int(prefs.get("deuda_cuota") or 0),
+                                           key="cfg_deuda_cuota")
+        with col_d3:
+            deuda_fecha_fin = st.text_input("Fecha fin (MM/AAAA)", placeholder="12/2028",
+                                             value=prefs.get("deuda_fecha_fin") or "",
+                                             key="cfg_deuda_fecha")
+    else:
+        deuda_importe, deuda_cuota, deuda_fecha_fin = 0, 0, ""
+
+    contexto_estrategico = st.text_area(
+        "Contexto estratégico (opcional)",
+        value=prefs.get("contexto_estrategico") or "",
+        placeholder=(
+            "Ej: Mi liquidez cubre una deuda — no es caja libre.\n"
+            "XTB es mi bloque de crecimiento, no mi patrimonio total.\n"
+            "Travel no tiene ejecuciones previstas hasta noviembre."
+        ),
+        max_chars=300,
+        help="Se incluye en el prompt para que el LLM entienda tu estrategia global.",
+        key="cfg_contexto"
+    )
+
+    st.divider()
+
+    # ── Sección B: Otras Categorías ───────────────────────────────────────────
+    st.subheader("🗂️ Otras Categorías")
+    st.caption(
+        "Las categorías seleccionadas se agrupan bajo 'Otras Categorías' "
+        "en el Dashboard y la tabla de Presupuesto."
+    )
+
+    df_todos = get_todos_gastos(supabase, user_id)
+    if df_todos.empty:
+        cats_todas = []
+    else:
+        cats_todas = sorted(df_todos["categoria_consumo"].dropna().unique().tolist())
+
+    default_otros = [c for c in (prefs.get("categorias_otros") or []) if c in cats_todas]
+
+    categorias_otros = st.multiselect(
+        "Categorías a agrupar como 'Otras'",
+        options=cats_todas,
+        default=default_otros,
+        help="Solo se muestran las categorías que tienes en tus datos.",
+        key="cfg_cats_otros"
+    )
+
+    st.divider()
+
+    # ── Botón guardar ─────────────────────────────────────────────────────────
+    if st.button("💾 Guardar configuración", type="primary"):
+        save_user_preferences(supabase, user_id, {
+            "pais": pais,
+            "perfil_inversion": perfil,
+            "categorias_inversion": categorias_inversion,
+            "tiene_deudas": tiene_deudas == "Sí",
+            "deuda_importe": float(deuda_importe),
+            "deuda_cuota": float(deuda_cuota),
+            "deuda_fecha_fin": deuda_fecha_fin,
+            "contexto_estrategico": contexto_estrategico,
+            "categorias_otros": categorias_otros,
+        })
+        # Actualizar session_state inmediatamente sin esperar al próximo rerun de main()
+        st.session_state.categorias_otros = categorias_otros
+        get_user_preferences.clear()
+        st.success("✅ Configuración guardada.")
 
 #  UI de la Pagina Prompt Engine
 def pagina_prompt(supabase, user_id):
     st.title("🤖 Prompt Maestro")
     st.caption("Genera un resumen de tu situación financiera para analizar con ChatGPT, Gemini, Claude, etc.")
 
+    # Cargar preferencias guardadas
+    prefs = get_user_preferences(supabase, user_id)
+
+    paises = ["España", "Otro"]
+    pais_idx = paises.index(prefs["pais"]) if prefs["pais"] in paises else 0
+    perfiles = ["Conservador", "Moderado-conservador", "Moderado", "Moderado-agresivo", "Agresivo"]
+    perfil_idx = perfiles.index(prefs["perfil_inversion"]) if prefs["perfil_inversion"] in perfiles else 2
+
     col1, col2 = st.columns(2)
     with col1:
-        pais = st.selectbox("País", ["España", "Otro"], index=0)
+        pais = st.selectbox("País", paises, index=pais_idx)
     with col2:
-        perfil = st.selectbox(
-            "Perfil de inversión",
-            ["Conservador", "Moderado-conservador", "Moderado", "Moderado-agresivo", "Agresivo"],
-            index=2
-        )
+        perfil = st.selectbox("Perfil de inversión", perfiles, index=perfil_idx)
 
     categorias_disponibles = get_categorias_usuario(supabase, user_id)
-    default_inversion = [c for c in categorias_disponibles if "invest" in c.lower()]
+    default_inversion = [c for c in (prefs["categorias_inversion"] or [])
+                         if c in categorias_disponibles]
+    if not default_inversion:
+        default_inversion = [c for c in categorias_disponibles if "invest" in c.lower()]
 
     categorias_inversion = st.multiselect(
         "¿Qué categorías representan inversiones?",
@@ -2157,21 +2307,28 @@ def pagina_prompt(supabase, user_id):
     )
 
     # Deudas (condicional)
-    tiene_deudas = st.radio("¿Tienes deudas relevantes?", ["No", "Sí"], horizontal=True)
+    deudas_idx = 1 if prefs.get("tiene_deudas") else 0
+    tiene_deudas = st.radio("¿Tienes deudas relevantes?", ["No", "Sí"],
+                             index=deudas_idx, horizontal=True)
     if tiene_deudas == "Sí":
         col_d1, col_d2, col_d3 = st.columns(3)
         with col_d1:
-            deuda_importe = st.number_input("Importe total (€)", min_value=0, step=100, value=0)
+            deuda_importe = st.number_input("Importe total (€)", min_value=0, step=100,
+                                             value=int(prefs.get("deuda_importe") or 0))
         with col_d2:
-            deuda_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50, value=0)
+            deuda_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50,
+                                           value=int(prefs.get("deuda_cuota") or 0))
         with col_d3:
-            deuda_fecha_fin = st.text_input("Fecha fin (MM/AAAA)", placeholder="12/2028")
+            deuda_fecha_fin = st.text_input("Fecha fin (MM/AAAA)",
+                                             placeholder="12/2028",
+                                             value=prefs.get("deuda_fecha_fin") or "")
     else:
         deuda_importe, deuda_cuota, deuda_fecha_fin = 0, 0, ""
 
     # Contexto estratégico guiado
     contexto_estrategico = st.text_area(
         "Contexto estratégico (opcional)",
+        value=prefs.get("contexto_estrategico") or "",
         placeholder=(
             "Ej: Mi liquidez cubre una deuda — no es caja libre.\n"
             "XTB es mi bloque de crecimiento, no mi patrimonio total.\n"
@@ -2180,6 +2337,22 @@ def pagina_prompt(supabase, user_id):
         max_chars=300,
         help="Se incluye en el prompt para que el LLM entienda tu estrategia global."
     )
+
+    # Botón guardar preferencias
+    if st.button("💾 Guardar preferencias"):
+        save_user_preferences(supabase, user_id, {
+            "pais": pais,
+            "perfil_inversion": perfil,
+            "categorias_inversion": categorias_inversion,
+            "tiene_deudas": tiene_deudas == "Sí",
+            "deuda_importe": float(deuda_importe),
+            "deuda_cuota": float(deuda_cuota),
+            "deuda_fecha_fin": deuda_fecha_fin,
+            "contexto_estrategico": contexto_estrategico,
+        })
+        st.success("✅ Preferencias guardadas.")
+
+    st.divider()
 
     if st.button("🔄 Generar prompt", type="primary"):
         with st.spinner("Generando..."):
@@ -2495,7 +2668,8 @@ def main():
     pagina = st.sidebar.radio(
         "Ir a:",
         ["📊 Dashboard", "📋 Presupuesto", "🔍 Detalle",
-         "💳 Bancos", "🔮 Proyección", "💼 Cartera", "🤖 Prompt IA", "📤 Sincronizar"],
+         "💳 Bancos", "🔮 Proyección", "💼 Cartera", "🤖 Prompt IA",
+         "⚙️ Configuración", "📤 Sincronizar"],
         index=0
     )
 
@@ -2513,6 +2687,11 @@ def main():
         else:
             st.sidebar.warning(f"⚠️ Revisar saldos\n\nDif: €{diferencia:,.2f}")
 
+    # Cargar preferencias y resolver CATEGORIAS_OTROS dinámico
+    prefs = get_user_preferences(supabase, user_id)
+    cats_otros = prefs.get("categorias_otros", [])
+    st.session_state.categorias_otros = cats_otros if cats_otros else CATEGORIAS_OTROS_DEFAULT
+
     if pagina == "📊 Dashboard":
         pagina_dashboard(supabase, user_id)
     elif pagina == "📋 Presupuesto":
@@ -2529,6 +2708,7 @@ def main():
         pagina_cartera(supabase, user_id)
     elif pagina == "🤖 Prompt IA":
         pagina_prompt(supabase, user_id)
-
+    elif pagina == "⚙️ Configuración":
+        pagina_configuracion(supabase, user_id)
 if __name__ == "__main__":
     main()

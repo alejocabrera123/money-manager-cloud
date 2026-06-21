@@ -186,16 +186,16 @@ yfinance
 Menú lateral con `st.sidebar.radio()`. Orden actual:
 
 
-| Página         | Función               | Contenido                                                                                 |
-| -------------- | --------------------- | ----------------------------------------------------------------------------------------- |
-| 📊 Dashboard   | `pagina_dashboard()`  | KPIs mes actual, tabla presupuesto vs real, semáforo                                      |
-| 📈 Histórico   | `pagina_historico()`  | Barras ingresos/gastos por año, Waterfall/Mensual/Acumulado                               |
-| 🔍 Detalle     | `pagina_detalle()`    | Tabla filtrable (año/mes/categoría), todos los registros                                  |
-| 💳 Bancos      | `pagina_bancos()`     | Saldos editables, cuadre vs balance app, historial                                        |
-| 🔮 Proyección  | `pagina_proyeccion()` | Gráfico real vs teórico 2026, tabla mes a mes                                             |
-| 💼 Cartera     | `pagina_cartera()`    | Pestañas por cartera; KPIs, sector/ticker/historial, donuts; entrada manual de posiciones |
-| 🤖 Prompt IA   | `pagina_prompt()`     | Genera prompt financiero copiable para LLMs externos (Sprint 10.1)                        |
-| 📤 Sincronizar | `pagina_sync()`       | Upload xlsx, preview, TRUNCATE+INSERT                                                     |
+| Página         | Función                | Contenido                                                                                 |
+| :------------- | :--------------------- | :---------------------------------------------------------------------------------------- |
+| 📊 Dashboard   | `pagina_dashboard()`   | KPIs mes actual + gráficos históricos (barras, waterfall, mensual, acumulado)             |
+| 📋 Presupuesto | `pagina_presupuesto()` | Tabla estilo Excel: categorías × 12 meses, 2 sub-filas, colores G/R, selector de año      |
+| 🔍 Detalle     | `pagina_detalle()`     | Tabla filtrable (año/mes/categoría), todos los registros                                  |
+| 💳 Bancos      | `pagina_bancos()`      | Saldos editables, cuadre vs balance app, historial                                        |
+| 🔮 Proyección  | `pagina_proyeccion()`  | Gráfico real vs teórico 2026, tabla mes a mes                                             |
+| 💼 Cartera     | `pagina_cartera()`     | Pestañas por cartera; KPIs, sector/ticker/historial, donuts; entrada manual de posiciones |
+| 🤖 Prompt IA   | `pagina_prompt()`      | Genera prompt financiero copiable para LLMs externos (Sprint 10.1)                        |
+| 📤 Sincronizar | `pagina_sync()`        | Upload xlsx, preview, TRUNCATE+INSERT                                                     |
 
 
 **Sidebar también muestra:** indicador ✅/⚠️ de cuadre bancos vs app + botón 🚪 Cerrar sesión.
@@ -310,59 +310,50 @@ pagina_prompt(supabase, user_id)                      # UI página 🤖 Prompt I
 ## 10. Plan de sprints
 
 
-| Sprint        | Nombre                                                    | Estado       |
-| ------------- | --------------------------------------------------------- | ------------ |
-| 1             | Base de datos en la nube                                  | ✅ Completado |
-| 2             | Sincronización desde xlsx                                 | ✅ Completado |
-| 3             | Dashboard Core                                            | ✅ Completado |
-| 4             | Dashboard Histórico y Detalle                             | ✅ Completado |
-| 5             | Saldos Bancarios                                          | ✅ Completado |
-| 6             | Proyección Anual                                          | ✅ Completado |
-| Multi-usuario | Auth + RLS + aislamiento de datos                         | ✅ Completado |
-| Ajuste        | Fix paginación, cache sidebar, invalidación quirúrgica    | ✅ Completado |
-| 7             | Pivot Detalle, CSV Presupuestos, Otras Categorías         | ✅ Completado |
-| 8             | Cartera v1 — upload xlsx Google Sheets + visualización    | ✅ Completado |
-| 9             | Cartera v2 — precio en tiempo real vía yfinance           | ✅ Completado |
-| 9.2           | Cartera v3 — multi-cartera + entrada manual de posiciones | ✅ Completado |
-| 9.3           | Efectivo en Bróker — saldo editable por cartera           | ✅ Completado |
-| 10.1          | Master Prompt Engine (MVP)                                | ✅ Completado |
-| 10.2          | Refinamiento Master Prompt (feedback 2 iteraciones)       | ✅ Completado |
-| 10.3          | Backlog mayor (deudas, patrimonio histórico, reorden)     | ✅ Completado |
-| 11            | Tabla presupuesto estilo Excel (versión Streamlit 80%)    | 🔄 Diseñado  |
-| 12            | Capa de IA (alertas, proyección estadística, Gemini)      | 🔄 Diseñado  |
-| 13            | Email automation (Make + FastAPI + Render)                | 🔄 Diseñado  |
+| Sprint        | Nombre                                                                 | Estado       |
+| :------------ | :--------------------------------------------------------------------- | :----------- |
+| 1             | Base de datos en la nube                                               | ✅ Completado |
+| 2             | Sincronización desde xlsx                                              | ✅ Completado |
+| 3             | Dashboard Core                                                         | ✅ Completado |
+| 4             | Dashboard Histórico y Detalle                                          | ✅ Completado |
+| 5             | Saldos Bancarios                                                       | ✅ Completado |
+| 6             | Proyección Anual                                                       | ✅ Completado |
+| Multi-usuario | Auth + RLS + aislamiento de datos                                      | ✅ Completado |
+| Ajuste        | Fix paginación, cache sidebar, invalidación quirúrgica                 | ✅ Completado |
+| 7             | Pivot Detalle, CSV Presupuestos, Otras Categorías                      | ✅ Completado |
+| 8             | Cartera v1 — upload xlsx Google Sheets + visualización                 | ✅ Completado |
+| 9             | Cartera v2 — precio en tiempo real vía yfinance                        | ✅ Completado |
+| 9.2           | Cartera v3 — multi-cartera + entrada manual de posiciones              | ✅ Completado |
+| 9.3           | Efectivo en Bróker — saldo editable por cartera                        | ✅ Completado |
+| 10.1          | Master Prompt Engine (MVP)                                             | ✅ Completado |
+| 10.2          | Refinamiento Master Prompt (feedback 2 iteraciones)                    | ✅ Completado |
+| 10.3          | Backlog mayor (deudas, patrimonio histórico, reorden)                  | ✅ Completado |
+| 11            | Tabla presupuesto estilo Excel (versión Streamlit 80%)                 | ✅ Completado |
+| 12            | Configurador de usuario (user_preferences + CATEGORIAS_OTROS dinámico) | 🔄 Diseñado  |
+| 13            | Fixes de cartera (FIFO/LIFO + cartera_snapshots)                       | 🔄 Diseñado  |
+| 14            | Capa de IA (alertas, proyección estadística, Gemini)                   | 🔄 Diseñado  |
+| 15            | Email automation (Make + FastAPI + Render)                             | 🔄 Diseñado  |
 
 
 ---
 
-## 11. Sprint activo — 10
-
-### Sprint 11 -  Tabla presupuesto estilo Excel (versión Streamlit 80%)
-
-**Objetivo:** Replicar la tabla Excel manual de David en la app. Categorías en filas con 2 sub-filas (Gasto real / Presupuesto), 12 meses en columnas, colores verde/rojo automáticos según si se supera el presupuesto.
-
-**Prototipo de referencia:** `budget_table_prototype.html` — generado por ChatGPT a partir de captura del Excel original.
-
-**Alcance confirmado para Streamlit (80%):**
-
-- Dos sub-filas por categoría: Gasto real + Presupuesto
-- Colores G/P automáticos por celda (verde si gasto ≤ presupuesto, rojo si supera)
-- Columna Total anual por categoría
-- Fila de totales al pie (Presupuesto total / Total gastado / Diferencia)
-- Usuarios sin presupuesto (Alicia): se omite sub-fila Presupuesto, Gasto se muestra sin color condicional
-
-**Fuera de alcance en Streamlit — diferido a Reflex:**
-
-- Sticky headers y columnas sticky al hacer scroll
-- Bandas de color por categoría (fondo diferente por grupo)
-- Edición inline de presupuesto con autoguardado a Supabase
-
-**Implementación técnica:** pandas Styler con `.map()`. Nueva función `generar_tabla_presupuesto_anual()` en `app.py`. Se mostrará en `pagina_dashboard()` o como nueva pestaña dentro del Dashboard.
-
-**Pendiente de decidir antes de codificar:**
-
-- ¿Dónde vive en la app? ¿Nueva página, pestaña dentro de Dashboard, o expander?
-- ¿Solo año actual o selector de año?
+## 11. Sprint activo y próximos sprints inmediatos
+### Sprint 12 — Configurador de usuario
+🔄 Diseñado — pendiente de arrancar
+**Alcance:**
+- `user_preferences`: tabla Supabase (una fila por usuario, UPSERT). 
+  Campos: perfil_inversion, deuda_importe, deuda_cuota, deuda_fecha_fin, 
+  contexto_estrategico, pais, cuenta_personal, categorias_inversion.
+  Los inputs de pagina_prompt() se cargan desde esta tabla al entrar y se 
+  guardan con botón "💾 Guardar preferencias".
+- `CATEGORIAS_OTROS` dinámico: UI para que cada usuario gestione qué 
+  categorías se agrupan en "Otras Categorías", en lugar de lista hardcodeada.
+### Sprint 13 — Fixes de cartera
+🔄 Diseñado — pendiente de arrancar
+**Alcance:**
+- FIFO/LIFO para cerrar posiciones con match de lote específico
+- `cartera_snapshots`: tabla para historial de valor de cartera a lo largo 
+  del tiempo (valor de mercado vs coste por fecha)
 
 ---
 
@@ -473,7 +464,7 @@ git reset --soft HEAD~1
 - **Supabase pausa proyectos gratuitos** sin actividad en 7 días → mitigado con GitHub Actions keep-alive.
 - **Streamlit Community Cloud** entra en sleep por inactividad — se reactiva en segundos, aceptable para uso personal.
 - `**st.session_state`** es el mecanismo para persistir estado entre reruns (mes_offset, saldos_edit, mostrar_saldos_post_sync, etc.).
-- `**@st.cache_resource**` para el cliente Supabase (una sola instancia). `**@st.cache_data(ttl=300)**` para datos — se invalida manualmente con `st.cache_data.clear()` tras sync.
+- `**@st.cache_resource`** para el cliente Supabase (una sola instancia). `**@st.cache_data(ttl=300)**` para datos — se invalida manualmente con `st.cache_data.clear()` tras sync.
 - **Plotly en requirements.txt es obligatorio** — Streamlit Cloud no lo incluye por defecto (bug detectado en Sprint 4).
 - `**openpyxl`** es la dependencia que permite a pandas leer `.xlsx`.
 - **Lotes de 500** en INSERT — Supabase puede rechazar inserts masivos en un solo request con 3000+ registros.
@@ -493,19 +484,19 @@ git reset --soft HEAD~1
 ## 16. Horizonte futuro (fuera del roadmap actual)
 
 
-| Proyecto / Feature                                | Notas                                                                                                                                                                                                                                                                             |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Gemma 4 como alternativa a Gemini**             | Apache 2.0, open-weight, disponible via Groq API (gratuito). Anotado en backlog de ideas para Sprint 11.                                                                                                                                                                          |
-| **Reflex**                                        | Alternativa a Streamlit si se necesita control CSS/Bootstrap. No viable en Streamlit.                                                                                                                                                                                             |
-| **Airbnb**                                        | Cuenta separada, datos excluidos actualmente. Sprint futuro dedicado.                                                                                                                                                                                                             |
-| **Cartera & Patrimonio — Net Worth**              | Sprint 9 completado (precio RT). Layout dos columnas con placeholder gráfico histórico. Vista Net Worth pendiente.                                                                                                                                                                |
-| **Registro de inversiones nativo**                | ✅ Completado — Sprint 9.2. Entrada manual de posiciones + multi-cartera. Ver changelog (sección 19).                                                                                                                                                                              |
-| **Configurador de usuario**                       | Ver sección 18.2. Sprint futuro dedicado.                                                                                                                                                                                                                                         |
-| **Gráfico histórico cartera**                     | Valor de mercado vs coste a lo largo del tiempo. Requiere tabla `cartera_snapshots` con snapshot diario al sincronizar. Por ticker y global.                                                                                                                                      |
-| **Importación cartera estándar**                  | Formato CSV estándar para que otros usuarios (ej: Alicia) puedan importar su cartera sin depender de la estructura del xlsx de David.                                                                                                                                             |
-| **Cerrar posición con match de lote (FIFO/LIFO)** | Pendiente desde Sprint 9.2. El cálculo actual de "Invertido" usa precio medio de compra por ticker (parche en 9.3), pero no rastrea qué lote específico se vendió. Sprint futuro si se necesita detalle por lote. |                                                               |
-| **Tabla presupuesto editable (Vercel/Reflex)**    | Misma tabla estilo Excel pero con edición inline de presupuestos + autoguardado (botón "Guardar" o modal "¿guardar cambios?" al cambiar de página) → UPSERT a `presupuestos`. Reemplazaría el flujo CSV actual. Fusionar con Configurador de usuario (18.2) cuando se implemente. |
-
+| Proyecto / Feature                                | Notas                                                                                                                                                                                                                                                                                                                        |
+| :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Gemma 4 como alternativa a Gemini**             | Apache 2.0, open-weight, disponible via Groq API (gratuito). Anotado en backlog de ideas para Sprint 11.                                                                                                                                                                                                                     |
+| **Reflex**                                        | Alternativa a Streamlit si se necesita control CSS/Bootstrap. No viable en Streamlit.                                                                                                                                                                                                                                        |
+| **Airbnb**                                        | Cuenta separada, datos excluidos actualmente. Sprint futuro dedicado.                                                                                                                                                                                                                                                        |
+| **Cartera & Patrimonio — Net Worth**              | Sprint 9 completado (precio RT). Layout dos columnas con placeholder gráfico histórico. Vista Net Worth pendiente.                                                                                                                                                                                                           |
+| **Registro de inversiones nativo**                | ✅ Completado — Sprint 9.2. Entrada manual de posiciones + multi-cartera. Ver changelog (sección 19).                                                                                                                                                                                                                         |
+| **Configurador de usuario**                       | Ver sección 18.2. Sprint futuro dedicado.                                                                                                                                                                                                                                                                                    |
+| **Gráfico histórico cartera**                     | Valor de mercado vs coste a lo largo del tiempo. Requiere tabla `cartera_snapshots` con snapshot diario al sincronizar. Por ticker y global.                                                                                                                                                                                 |
+| **Importación cartera estándar**                  | Formato CSV estándar para que otros usuarios (ej: Alicia) puedan importar su cartera sin depender de la estructura del xlsx de David.                                                                                                                                                                                        |
+| **Cerrar posición con match de lote (FIFO/LIFO)** | Pendiente desde Sprint 9.2. El cálculo actual de "Invertido" usa precio medio de compra por ticker (parche en 9.3), pero no rastrea qué lote específico se vendió. Sprint futuro si se necesita detalle por lote.                                                                                                            |
+| **Tabla presupuesto editable (Vercel/Reflex)**    | Misma tabla estilo Excel pero con edición inline de presupuestos + autoguardado (botón "Guardar" o modal "¿guardar cambios?" al cambiar de página) → UPSERT a `presupuestos`. Reemplazaría el flujo CSV actual. Fusionar con Configurador de usuario (18.2) cuando se implemente.                                            |
+| **user_preferences**                              | Tabla Supabase con una fila por usuario (UPSERT). Guarda perfil MiFID, deuda (importe/cuota/fecha fin), contexto estratégico, país, cuenta personal por defecto, categorías de inversión. Reemplaza los inputs no persistidos de pagina_prompt(). Sprint futuro — candidato a fusionarse con Configurador de usuario (18.2). |
 
 ---
 
@@ -534,17 +525,16 @@ Funcionalidades no viables en Streamlit nativo, pendientes para cuando se adopte
 
 Panel de configuración personal dentro de la app. Ideas y características a discutir:
 
-
-| Característica                    | Detalle                                                                                                                       |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Gestión de Otras Categorías       | UI para seleccionar qué categorías se agrupan en "Otras Categorías" en el Dashboard, en lugar de lista hardcodeada            |
-| Generación de plantilla CSV       | Botón para descargar plantilla de presupuesto con las categorías reales del usuario, lista para rellenar e importar           |
-| Editor manual de presupuestos     | Alternativa al CSV: tabla editable directamente en la app por categoría y mes                                                 |
-| Preferencias de visualización     | Configurar colores, categorías a mostrar/ocultar, orden de páginas                                                            |
-| Cuenta personal por defecto       | Guardar la cuenta seleccionada (ej. "Euros", "Dinero") como preferencia del usuario para no tener que elegirla en cada sync | |
-| Tabla presupuesto editable inline | Ver horizonte futuro — reemplazo del CSV/editor manual cuando se migre a Reflex/Vercel                                        |
-| Tabla presupuesto editable inline | Ver horizonte futuro — reemplazo del CSV/editor manual cuando se migre a Reflex/Vercel                                        |
-
+| Característica                    | Detalle                                                                                                                                                                       |
+| :-------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gestión de Otras Categorías       | UI para seleccionar qué categorías se agrupan en "Otras Categorías" en el Dashboard, en lugar de lista hardcodeada                                                            |
+| Generación de plantilla CSV       | Botón para descargar plantilla de presupuesto con las categorías reales del usuario, lista para rellenar e importar                                                           |
+| Editor manual de presupuestos     | Alternativa al CSV: tabla editable directamente en la app por categoría y mes                                                                                                 |
+| Preferencias de visualización     | Configurar colores, categorías a mostrar/ocultar, orden de páginas                                                                                                            |
+| Cuenta personal por defecto       | Guardar la cuenta seleccionada (ej. "Euros", "Dinero") como preferencia del usuario para no tener que elegirla en cada sync                                                   |
+| Tabla presupuesto editable inline | Ver horizonte futuro — reemplazo del CSV/editor manual cuando se migre a Reflex/Vercel                                                                                        |
+| Tabla presupuesto editable inline | Ver horizonte futuro — reemplazo del CSV/editor manual cuando se migre a Reflex/Vercel                                                                                        |
+| Preferencias Prompt IA            | Persistir en Supabase los inputs de pagina_prompt(): perfil MiFID, deuda, contexto estratégico, país. Tabla user_preferences — una fila por usuario, UPSERT en cada guardado. |
 
 ---
 
@@ -639,4 +629,22 @@ Nueva página "🤖 Prompt IA" que agrega automáticamente la situación financi
 - **Tasa de ahorro — mes en curso**: lógica condicional en `generar_tabla_mensual_ingresos_gastos()`. Mes actual → `⏳ Mes en curso`. Mes pasado sin ingresos → `— sin ingresos`. Resto → cálculo normal.
 - **Otras Categorías siempre al final**: fix de ordenación en `generar_tabla_anual()` — el sort por `Real YTD` ahora excluye la fila agregada "Otras Categorías", que se concatena al final después del sort.
 - **Reorden y fusión de secciones del prompt**: nueva Sección 2 "Patrimonio Neto Estimado" que consolida liquidez bancaria + valor de cada cartera (con conversión EUR al tipo de cambio actual) + patrimonio total estimado + meses de cobertura + deuda. Sección 3 pasa a ser "Flujo del Año". Sección 4 queda como "Cartera — Detalle" con KPIs + sectores + posiciones sin repetir el resumen patrimonial.
+
+### Sprint 11 — Tabla presupuesto estilo Excel (20 Jun 2026)
+
+**Implementado:**
+
+- **Nueva página 📋 Presupuesto**: tabla categorías × 12 meses con 2 sub-filas por categoría (Gasto real / Presupuesto). Selector de año desde el principio.
+- **Colores automáticos**: verde si gasto ≤ presupuesto, rojo si supera. Sin color para usuarios sin presupuesto (Alicia).
+- **Alternancia gris/blanco** por grupos de categoría para legibilidad.
+- **Columna Total anual** al final (suma de los 12 meses por sub-fila).
+- **3 filas de totales al pie**: Presupuesto total / Total gastado / % Ejecución (verde ≤ 100%, rojo > 100%).
+- **Otras Categorías** agregadas en fila única al final (misma lógica que `generar_tabla_anual()`).
+- **Dashboard reorganizado**: absorbe los gráficos de Histórico (barras Ingresos/Gastos + Balance cascada/mensual/acumulado). KPIs del mes actual se mantienen arriba.
+- **Página 📈 Histórico eliminada** — sus gráficos viven ahora en Dashboard.
+- **Menú lateral actualizado**: 📈 Histórico → 📋 Presupuesto.
+
+**Pendiente / conocido:**
+
+- 3 filas en blanco encima de los totales al pie — comportamiento del MultiIndex en Streamlit, no crítico, diferido a migración Reflex.
 

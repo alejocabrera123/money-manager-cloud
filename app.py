@@ -300,34 +300,96 @@ CATEGORIAS_OTROS_DEFAULT = []  # cada usuario configura las suyas desde ⚙️ C
 
 @st.cache_data(ttl=300)
 def get_user_preferences(_supabase, user_id):
-    """Carga preferencias del usuario desde Supabase. Devuelve dict con defaults si no existe fila."""
-    result = _supabase.table("user_preferences")\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .execute()
-    if result.data:
-        return result.data[0]
+    """Carga preferencias del usuario desde las 3 tablas normalizadas. Devuelve dict plano con defaults."""
+    # user_profiles
+    r_profile = _supabase.table("user_profiles").select("*").eq("user_id", user_id).execute()
+    profile = r_profile.data[0] if r_profile.data else {}
+
+    # objetivos_financieros
+    r_obj = _supabase.table("objetivos_financieros").select("*").eq("user_id", user_id).execute()
+    objetivos = r_obj.data[0] if r_obj.data else {}
+
+    # deudas (lista)
+    r_deudas = _supabase.table("deudas").select("*").eq("user_id", user_id).execute()
+    deudas = r_deudas.data if r_deudas.data else []
+
     return {
-        "pais": "España",
-        "perfil_inversion": "Moderado",
-        "categorias_inversion": [],
-        "tiene_deudas": False,
-        "deuda_importe": 0,
-        "deuda_cuota": 0,
-        "deuda_fecha_fin": "",
-        "contexto_estrategico": "",
-        "categorias_otros": [],
-        "cuenta_personal": "Euros",
+        # user_profiles
+        "pais":                  profile.get("pais", "España"),
+        "perfil_inversion":      profile.get("perfil_inversion", "Moderado"),
+        "categorias_inversion":  profile.get("categorias_inversion", []),
+        "contexto_estrategico":  profile.get("contexto_estrategico", ""),
+        "categorias_otros":      profile.get("categorias_otros", []),
+        "cuenta_personal":       profile.get("cuenta_personal", "Euros"),
+        # objetivos_financieros
+        "edad":                    objetivos.get("edad", None),
+        "horizonte_jubilacion":    objetivos.get("horizonte_jubilacion", None),
+        "objetivo_principal":      objetivos.get("objetivo_principal", ""),
+        "colchon_objetivo_meses":  objetivos.get("colchon_objetivo_meses", None),
+        # deudas
+        "deudas": deudas,
     }
 
 # Identifica que "Cuenta" del XLSX debe subirse a la APP Money Magnet, y en la siguiente subida lo tendrá pre seleccionado
 def save_user_preferences(supabase, user_id, prefs: dict):
-    """UPSERT de preferencias. Invalida cache tras guardar."""
-    prefs["user_id"] = user_id
-    prefs["updated_at"] = str(datetime.now())
-    supabase.table("user_preferences")\
-        .upsert(prefs, on_conflict="user_id")\
-        .execute()
+    """UPSERT en las 3 tablas normalizadas. Invalida cache tras guardar."""
+    now = str(datetime.now())
+
+    # user_profiles
+    supabase.table("user_profiles").upsert({
+        "user_id":               user_id,
+        "pais":                  prefs.get("pais", "España"),
+        "perfil_inversion":      prefs.get("perfil_inversion", "Moderado"),
+        "categorias_inversion":  prefs.get("categorias_inversion", []),
+        "contexto_estrategico":  prefs.get("contexto_estrategico", ""),
+        "categorias_otros":      prefs.get("categorias_otros", []),
+        "cuenta_personal":       prefs.get("cuenta_personal", "Euros"),
+        "updated_at":            now,
+    }, on_conflict="user_id").execute()
+
+    # objetivos_financieros
+    supabase.table("objetivos_financieros").upsert({
+        "user_id":                user_id,
+        "edad":                   prefs.get("edad", None),
+        "horizonte_jubilacion":   prefs.get("horizonte_jubilacion", None),
+        "objetivo_principal":     prefs.get("objetivo_principal", ""),
+        "colchon_objetivo_meses": prefs.get("colchon_objetivo_meses", None),
+        "updated_at":             now,
+    }, on_conflict="user_id").execute()
+
+    # deudas: gestión separada — save_user_preferences NO toca deudas
+    # Las deudas se guardan/eliminan con save_deuda() y delete_deuda()
+
+    get_user_preferences.clear()
+
+def save_deuda(supabase, user_id, deuda: dict):
+    """INSERT o UPDATE de una deuda. Si deuda tiene 'id', hace UPDATE; si no, INSERT."""
+    now = str(datetime.now())
+    if deuda.get("id"):
+        supabase.table("deudas").update({
+            "descripcion":             deuda.get("descripcion", ""),
+            "importe_total":           float(deuda.get("importe_total", 0)),
+            "cuota_mensual":           float(deuda.get("cuota_mensual", 0)),
+            "fecha_fin":               deuda.get("fecha_fin", ""),
+            "tiene_interes":           bool(deuda.get("tiene_interes", False)),
+            "amortizacion_anticipada": bool(deuda.get("amortizacion_anticipada", False)),
+            "updated_at":              now,
+        }).eq("id", deuda["id"]).eq("user_id", user_id).execute()
+    else:
+        supabase.table("deudas").insert({
+            "user_id":                 user_id,
+            "descripcion":             deuda.get("descripcion", ""),
+            "importe_total":           float(deuda.get("importe_total", 0)),
+            "cuota_mensual":           float(deuda.get("cuota_mensual", 0)),
+            "fecha_fin":               deuda.get("fecha_fin", ""),
+            "tiene_interes":           bool(deuda.get("tiene_interes", False)),
+            "amortizacion_anticipada": bool(deuda.get("amortizacion_anticipada", False)),
+        }).execute()
+    get_user_preferences.clear()
+
+def delete_deuda(supabase, user_id, deuda_id: int):
+    """Elimina una deuda por id."""
+    supabase.table("deudas").delete().eq("id", deuda_id).eq("user_id", user_id).execute()
     get_user_preferences.clear()
 
 def pagina_dashboard(supabase, user_id):
@@ -1791,9 +1853,12 @@ def generar_seccion_cartera(supabase, user_id):
 # ensamblamos todo con la plantilla
 
 def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=None,
-                           deuda_importe=0, deuda_cuota=0, deuda_fecha_fin="", contexto_estrategico=""):
+                           deudas=None, contexto_estrategico="",
+                           edad=None, horizonte_jubilacion=None,
+                           objetivo_principal="", colchon_objetivo_meses=None):
     """Ensambla el prompt completo para pegar en un LLM externo."""
     categorias_inversion = categorias_inversion or []
+    deudas = deudas or []
     hoy = date.today()
     year = hoy.year
 
@@ -1879,12 +1944,32 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
     lineas_patrimonio.append(f"- Patrimonio total estimado: ≈ €{patrimonio_eur:,.2f}")
     if linea_cobertura:
         lineas_patrimonio.append(linea_cobertura)
-    if deuda_importe > 0:
-        lineas_patrimonio.append(
-            f"- Deuda pendiente: €{deuda_importe:,.0f} — cuota €{deuda_cuota:,.0f}/mes hasta {deuda_fecha_fin}. "
-            f"El efectivo bancario cubre parcialmente esta obligación y no debe considerarse caja libre para inversión."
-        )
+
+    # Bloque deudas (lista dinámica)
+    if deudas:
+        for d in deudas:
+            desc = d.get("descripcion") or "Deuda"
+            interes_txt = " (con interés)" if d.get("tiene_interes") else ""
+            amort_txt = ", amortización anticipada posible" if d.get("amortizacion_anticipada") else ""
+            lineas_patrimonio.append(
+                f"- {desc}: €{d.get('importe_total', 0):,.0f} pendiente — "
+                f"cuota €{d.get('cuota_mensual', 0):,.0f}/mes hasta {d.get('fecha_fin', '—')}"
+                f"{interes_txt}{amort_txt}"
+            )
+
     bloque_patrimonio = "\n".join(lineas_patrimonio)
+
+    # Bloque objetivos (solo si hay datos)
+    lineas_objetivos = []
+    if edad:
+        lineas_objetivos.append(f"- Edad: {edad} años")
+    if horizonte_jubilacion:
+        lineas_objetivos.append(f"- Horizonte hasta jubilación: {horizonte_jubilacion} años")
+    if objetivo_principal:
+        lineas_objetivos.append(f"- Objetivo principal: {objetivo_principal}")
+    if colchon_objetivo_meses:
+        lineas_objetivos.append(f"- Colchón objetivo: {colchon_objetivo_meses} meses de gastos")
+    bloque_objetivos = "\n".join(lineas_objetivos) if lineas_objetivos else "- No especificados"
 
     return f"""Actúa como mi asesor financiero personal. Voy a darte mi situación financiera completa. Tu trabajo es analizarla con honestidad, sin suavizar diagnósticos, y darme un plan de acción concreto.
 
@@ -1895,10 +1980,13 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
 - Fecha del informe: {hoy.strftime('%d/%m/%Y')}
 {f"- Contexto estratégico: {contexto_estrategico}" if contexto_estrategico.strip() else ""}
 
-### 2. PATRIMONIO NETO ESTIMADO
+### 2. OBJETIVOS FINANCIEROS
+{bloque_objetivos}
+
+### 3. PATRIMONIO NETO ESTIMADO
 {bloque_patrimonio}
 
-### 3. FLUJO DEL AÑO {year}
+### 4. FLUJO DEL AÑO {year}
 - Presupuesto Anual = suma de los 12 presupuestos mensuales. Real YTD = acumulado real desde el 1 de enero. % Alcance = Real YTD / Presupuesto Anual.
 
 {tabla_anual}
@@ -1911,7 +1999,7 @@ def generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion=
 
 {tabla_mensual}
 
-### 4. CARTERA — DETALLE
+### 5. CARTERA — DETALLE
 {seccion_cartera}
 
 ### INSTRUCCIONES
@@ -1924,6 +2012,7 @@ Mi perfil de inversión es {perfil} y vivo en {pais}. Con esa referencia, evalú
 5. **Plan de acción**: 3 acciones concretas para los próximos 30 días, ordenadas de mayor a menor impacto.
 
 No repitas los números que te doy — interprétalos. Si algo está mal, dilo sin rodeos."""
+
 
 # Nueva función para generar la tabla presupuesto vs gasto real del año en curso (YTD).
 def generar_tabla_presupuesto_anual(supabase, user_id, year):
@@ -2196,26 +2285,6 @@ def pagina_configuracion(supabase, user_id):
         key="cfg_cats_inversion"
     )
 
-    deudas_idx = 1 if prefs.get("tiene_deudas") else 0
-    tiene_deudas = st.radio("¿Tienes deudas relevantes?", ["No", "Sí"],
-                             index=deudas_idx, horizontal=True, key="cfg_deudas")
-    if tiene_deudas == "Sí":
-        col_d1, col_d2, col_d3 = st.columns(3)
-        with col_d1:
-            deuda_importe = st.number_input("Importe total (€)", min_value=0, step=100,
-                                             value=int(prefs.get("deuda_importe") or 0),
-                                             key="cfg_deuda_importe")
-        with col_d2:
-            deuda_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50,
-                                           value=int(prefs.get("deuda_cuota") or 0),
-                                           key="cfg_deuda_cuota")
-        with col_d3:
-            deuda_fecha_fin = st.text_input("Fecha fin (MM/AAAA)", placeholder="12/2028",
-                                             value=prefs.get("deuda_fecha_fin") or "",
-                                             key="cfg_deuda_fecha")
-    else:
-        deuda_importe, deuda_cuota, deuda_fecha_fin = 0, 0, ""
-
     contexto_estrategico = st.text_area(
         "Contexto estratégico (opcional)",
         value=prefs.get("contexto_estrategico") or "",
@@ -2231,7 +2300,133 @@ def pagina_configuracion(supabase, user_id):
 
     st.divider()
 
-    # ── Sección B: Otras Categorías ───────────────────────────────────────────
+    # ── Sección B: Objetivos financieros ─────────────────────────────────────
+    st.subheader("🎯 Objetivos financieros")
+    st.caption("Datos estáticos sobre tu horizonte y metas. El LLM los usará para contextualizar el análisis.")
+
+    col_o1, col_o2 = st.columns(2)
+    with col_o1:
+        edad = st.number_input(
+            "Tu edad", min_value=18, max_value=80, step=1,
+            value=int(prefs["edad"]) if prefs.get("edad") else 18,
+            key="cfg_edad"
+        )
+    with col_o2:
+        horizonte = st.number_input(
+            "Años hasta jubilación", min_value=0, max_value=50, step=1,
+            value=int(prefs["horizonte_jubilacion"]) if prefs.get("horizonte_jubilacion") else 0,
+            key="cfg_horizonte"
+        )
+
+    objetivo_principal = st.text_input(
+        "Objetivo financiero principal",
+        value=prefs.get("objetivo_principal") or "",
+        placeholder="Ej: Alcanzar independencia financiera a los 50 años",
+        key="cfg_objetivo"
+    )
+
+    colchon = st.number_input(
+        "Colchón objetivo (meses de gastos)", min_value=0, max_value=36, step=1,
+        value=int(prefs["colchon_objetivo_meses"]) if prefs.get("colchon_objetivo_meses") else 0,
+        key="cfg_colchon"
+    )
+
+    st.divider()
+
+    # ── Sección C: Deudas ─────────────────────────────────────────────────────
+    st.subheader("💳 Deudas")
+    st.caption("Registra tus deudas relevantes. Se incluyen en el prompt automáticamente.")
+
+    deudas_actuales = prefs.get("deudas", [])
+
+    # Mostrar deudas existentes
+    for i, deuda in enumerate(deudas_actuales):
+        with st.expander(f"{'📄 ' + deuda['descripcion'] if deuda.get('descripcion') else f'Deuda {i+1}'}", expanded=False):
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                desc_edit = st.text_input("Descripción", value=deuda.get("descripcion", ""),
+                                          key=f"deuda_desc_{i}", placeholder="Ej: Hipoteca, Préstamo coche")
+                importe_edit = st.number_input("Importe total (€)", min_value=0, step=100,
+                                               value=int(deuda.get("importe_total") or 0),
+                                               key=f"deuda_importe_{i}")
+                cuota_edit = st.number_input("Cuota mensual (€)", min_value=0, step=50,
+                                             value=int(deuda.get("cuota_mensual") or 0),
+                                             key=f"deuda_cuota_{i}")
+            with col_d2:
+                fecha_edit = st.text_input("Fecha fin (MM/AAAA)", placeholder="12/2028",
+                                           value=deuda.get("fecha_fin", ""),
+                                           key=f"deuda_fecha_{i}")
+                interes_edit = st.checkbox("¿Tiene interés?",
+                                           value=bool(deuda.get("tiene_interes", False)),
+                                           key=f"deuda_interes_{i}")
+                amort_edit = st.checkbox("¿Amortización anticipada posible?",
+                                         value=bool(deuda.get("amortizacion_anticipada", False)),
+                                         key=f"deuda_amort_{i}")
+
+            col_save, col_del = st.columns([1, 1])
+            with col_save:
+                if st.button("💾 Guardar deuda", key=f"save_deuda_{i}"):
+                    save_deuda(supabase, user_id, {
+                        "id": deuda["id"],
+                        "descripcion": desc_edit,
+                        "importe_total": float(importe_edit),
+                        "cuota_mensual": float(cuota_edit),
+                        "fecha_fin": fecha_edit,
+                        "tiene_interes": interes_edit,
+                        "amortizacion_anticipada": amort_edit,
+                    })
+                    st.success("✅ Deuda actualizada.")
+                    st.rerun()
+            with col_del:
+                if st.button("🗑️ Eliminar deuda", key=f"del_deuda_{i}"):
+                    delete_deuda(supabase, user_id, deuda["id"])
+                    st.rerun()
+
+    # Botón añadir nueva deuda
+    if len(deudas_actuales) < 3:
+        st.markdown("")
+        if st.button("➕ Añadir deuda", key="add_deuda"):
+            if "nueva_deuda_abierta" not in st.session_state:
+                st.session_state.nueva_deuda_abierta = False
+            st.session_state.nueva_deuda_abierta = True
+            st.rerun()
+
+    if st.session_state.get("nueva_deuda_abierta"):
+        st.markdown("**Nueva deuda**")
+        col_n1, col_n2 = st.columns(2)
+        with col_n1:
+            nueva_desc = st.text_input("Descripción", key="nueva_desc", placeholder="Ej: Hipoteca")
+            nueva_importe = st.number_input("Importe total (€)", min_value=0, step=100, key="nueva_importe")
+            nueva_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50, key="nueva_cuota")
+        with col_n2:
+            nueva_fecha = st.text_input("Fecha fin (MM/AAAA)", placeholder="12/2028", key="nueva_fecha")
+            nueva_interes = st.checkbox("¿Tiene interés?", key="nueva_interes")
+            nueva_amort = st.checkbox("¿Amortización anticipada posible?", key="nueva_amort")
+
+        col_ok, col_cancel = st.columns([1, 1])
+        with col_ok:
+            if st.button("✅ Confirmar deuda", key="confirm_nueva_deuda"):
+                if nueva_importe > 0 and nueva_cuota > 0:
+                    save_deuda(supabase, user_id, {
+                        "descripcion": nueva_desc,
+                        "importe_total": float(nueva_importe),
+                        "cuota_mensual": float(nueva_cuota),
+                        "fecha_fin": nueva_fecha,
+                        "tiene_interes": nueva_interes,
+                        "amortizacion_anticipada": nueva_amort,
+                    })
+                    st.session_state.nueva_deuda_abierta = False
+                    st.rerun()
+                else:
+                    st.warning("Importe y cuota son obligatorios.")
+        with col_cancel:
+            if st.button("❌ Cancelar", key="cancel_nueva_deuda"):
+                st.session_state.nueva_deuda_abierta = False
+                st.rerun()
+
+    st.divider()
+
+    # ── Sección D: Otras Categorías ───────────────────────────────────────────
     st.subheader("🗂️ Otras Categorías")
     st.caption(
         "Las categorías seleccionadas se agrupan bajo 'Otras Categorías' "
@@ -2256,22 +2451,20 @@ def pagina_configuracion(supabase, user_id):
 
     st.divider()
 
-    # ── Botón guardar ─────────────────────────────────────────────────────────
+    # ── Botón guardar (perfil + objetivos) ────────────────────────────────────
     if st.button("💾 Guardar configuración", type="primary"):
         save_user_preferences(supabase, user_id, {
             "pais": pais,
             "perfil_inversion": perfil,
             "categorias_inversion": categorias_inversion,
-            "tiene_deudas": tiene_deudas == "Sí",
-            "deuda_importe": float(deuda_importe),
-            "deuda_cuota": float(deuda_cuota),
-            "deuda_fecha_fin": deuda_fecha_fin,
             "contexto_estrategico": contexto_estrategico,
             "categorias_otros": categorias_otros,
+            "edad": int(edad) if edad else None,
+            "horizonte_jubilacion": int(horizonte) if horizonte else None,
+            "objetivo_principal": objetivo_principal,
+            "colchon_objetivo_meses": int(colchon) if colchon else None,
         })
-        # Actualizar session_state inmediatamente sin esperar al próximo rerun de main()
         st.session_state.categorias_otros = categorias_otros
-        get_user_preferences.clear()
         st.success("✅ Configuración guardada.")
 
 #  UI de la Pagina Prompt Engine
@@ -2281,6 +2474,18 @@ def pagina_prompt(supabase, user_id):
 
     # Cargar preferencias guardadas
     prefs = get_user_preferences(supabase, user_id)
+
+    # Aviso si faltan datos de objetivos
+    campos_vacios = []
+    if not prefs.get("edad"):
+        campos_vacios.append("edad")
+    if not prefs.get("horizonte_jubilacion"):
+        campos_vacios.append("horizonte de jubilación")
+    if not prefs.get("objetivo_principal"):
+        campos_vacios.append("objetivo principal")
+    if campos_vacios:
+        st.info(f"💡 Faltan datos en tu perfil: {', '.join(campos_vacios)}. "
+                f"Complétalos en ⚙️ Configuración para un análisis más completo.")
 
     paises = ["España", "Otro"]
     pais_idx = paises.index(prefs["pais"]) if prefs["pais"] in paises else 0
@@ -2306,24 +2511,16 @@ def pagina_prompt(supabase, user_id):
         help="Afecta cómo se interpreta 'Gastos' en la evolución mensual."
     )
 
-    # Deudas (condicional)
-    deudas_idx = 1 if prefs.get("tiene_deudas") else 0
-    tiene_deudas = st.radio("¿Tienes deudas relevantes?", ["No", "Sí"],
-                             index=deudas_idx, horizontal=True)
-    if tiene_deudas == "Sí":
-        col_d1, col_d2, col_d3 = st.columns(3)
-        with col_d1:
-            deuda_importe = st.number_input("Importe total (€)", min_value=0, step=100,
-                                             value=int(prefs.get("deuda_importe") or 0))
-        with col_d2:
-            deuda_cuota = st.number_input("Cuota mensual (€)", min_value=0, step=50,
-                                           value=int(prefs.get("deuda_cuota") or 0))
-        with col_d3:
-            deuda_fecha_fin = st.text_input("Fecha fin (MM/AAAA)",
-                                             placeholder="12/2028",
-                                             value=prefs.get("deuda_fecha_fin") or "")
+    # Deudas — muestra resumen de las guardadas en Configuración
+    deudas_actuales = prefs.get("deudas", [])
+    if deudas_actuales:
+        st.markdown("**💳 Deudas registradas**")
+        for d in deudas_actuales:
+            desc = d.get("descripcion") or "Deuda"
+            st.caption(f"• {desc}: €{d.get('importe_total', 0):,.0f} — €{d.get('cuota_mensual', 0):,.0f}/mes hasta {d.get('fecha_fin', '—')}")
+        st.caption("Para editar las deudas, ve a ⚙️ Configuración.")
     else:
-        deuda_importe, deuda_cuota, deuda_fecha_fin = 0, 0, ""
+        st.caption("Sin deudas registradas. Puedes añadirlas en ⚙️ Configuración.")
 
     # Contexto estratégico guiado
     contexto_estrategico = st.text_area(
@@ -2338,17 +2535,19 @@ def pagina_prompt(supabase, user_id):
         help="Se incluye en el prompt para que el LLM entienda tu estrategia global."
     )
 
-    # Botón guardar preferencias
+    # Botón guardar preferencias (solo los campos editables inline)
     if st.button("💾 Guardar preferencias"):
         save_user_preferences(supabase, user_id, {
             "pais": pais,
             "perfil_inversion": perfil,
             "categorias_inversion": categorias_inversion,
-            "tiene_deudas": tiene_deudas == "Sí",
-            "deuda_importe": float(deuda_importe),
-            "deuda_cuota": float(deuda_cuota),
-            "deuda_fecha_fin": deuda_fecha_fin,
             "contexto_estrategico": contexto_estrategico,
+            # Preservar campos de objetivos sin sobreescribir
+            "edad": prefs.get("edad"),
+            "horizonte_jubilacion": prefs.get("horizonte_jubilacion"),
+            "objetivo_principal": prefs.get("objetivo_principal"),
+            "colchon_objetivo_meses": prefs.get("colchon_objetivo_meses"),
+            "categorias_otros": prefs.get("categorias_otros", []),
         })
         st.success("✅ Preferencias guardadas.")
 
@@ -2359,7 +2558,11 @@ def pagina_prompt(supabase, user_id):
             try:
                 st.session_state.prompt_generado = generar_prompt_master(
                     supabase, user_id, pais, perfil, categorias_inversion,
-                    deuda_importe, deuda_cuota, deuda_fecha_fin, contexto_estrategico
+                    deudas_actuales, contexto_estrategico,
+                    edad=prefs.get("edad"),
+                    horizonte_jubilacion=prefs.get("horizonte_jubilacion"),
+                    objetivo_principal=prefs.get("objetivo_principal"),
+                    colchon_objetivo_meses=prefs.get("colchon_objetivo_meses"),
                 )
             except Exception as e:
                 st.error(f"❌ Error al generar el prompt: {e}")

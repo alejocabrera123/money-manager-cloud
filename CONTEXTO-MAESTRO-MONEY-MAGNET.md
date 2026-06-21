@@ -143,6 +143,31 @@ fecha_registro    DATE NOT NULL DEFAULT CURRENT_DATE
 
 Lógica: snapshot editable, igual que `saldos_bancarios`. Cada guardado inserta nuevo registro con fecha; no se borran anteriores. Se muestra en un expander dentro de cada pestaña de cartera y se suma a "Valor actual" en los KPIs.
 
+### `user_preferences` — preferencias por usuario (Sprint 12)
+
+```
+id                   SERIAL PRIMARY KEY
+user_id              UUID REFERENCES auth.users(id) UNIQUE NOT NULL
+
+-- Prompt IA
+pais                 VARCHAR(50)   DEFAULT 'España'
+perfil_inversion     VARCHAR(30)   DEFAULT 'Moderado'
+categorias_inversion TEXT[]        DEFAULT '{}'
+tiene_deudas         BOOLEAN       DEFAULT FALSE
+deuda_importe        DECIMAL(12,2) DEFAULT 0
+deuda_cuota          DECIMAL(10,2) DEFAULT 0
+deuda_fecha_fin      VARCHAR(10)   DEFAULT ''
+contexto_estrategico TEXT          DEFAULT ''
+
+-- Configurador
+categorias_otros     TEXT[]        DEFAULT '{}'
+cuenta_personal      VARCHAR(100)  DEFAULT 'Euros'
+
+updated_at           TIMESTAMP DEFAULT NOW()
+```
+​
+Lógica: una fila por usuario, UPSERT en cada guardado. RLS habilitado.
+
 ### `presupuesto_mensual_total` — ⚠️ DESCARTADA
 
 Tabla vacía, no se usa. Los totales se calculan dinámicamente con `SUM()` sobre `presupuestos`.
@@ -301,8 +326,10 @@ generar_tabla_mensual_ingresos_gastos(supabase, user_id, year)  # tabla Ingresos
 generar_seccion_cartera(supabase, user_id)            # bloque markdown por cartera: efectivo, valor, sector, últimas 10 compras
 generar_prompt_master(supabase, user_id, pais, perfil, generar_tabla_mensual_ingresos_gastos(supabase, user_id, year, categorias_inversion)  # tabla Ingresos/Gastos/Aportaciones/Tasa ahorro por mes (YTD)
 generar_prompt_master(supabase, user_id, pais, perfil, categorias_inversion, deuda_importe, deuda_cuota, deuda_fecha_fin, contexto_estrategico)  # ensambla el prompt completo
-pagina_prompt(supabase, user_id)                      # UI página 🤖 Prompt IA — 5 niveles MiFID, deudas condicional, contexto estratégico
-
+get_user_preferences(_supabase, user_id)              # @st.cache_data(ttl=300) — carga preferencias desde user_preferences, devuelve dict con defaults si no existe fila
+save_user_preferences(supabase, user_id, prefs)       # UPSERT en user_preferences + invalida cache
+pagina_configuracion(supabase, user_id)               # UI ⚙️ Configuración — Sección A: Prompt IA, Sección B: Otras Categorías
+pagina_prompt(supabase, user_id)                      # UI 🤖 Prompt IA — carga desde user_preferences, botón 💾 Guardar bidireccional con Configuración
 ```
 
 ---
@@ -310,44 +337,47 @@ pagina_prompt(supabase, user_id)                      # UI página 🤖 Prompt I
 ## 10. Plan de sprints
 
 
-| Sprint        | Nombre                                                                 | Estado       |
-| :------------ | :--------------------------------------------------------------------- | :----------- |
-| 1             | Base de datos en la nube                                               | ✅ Completado |
-| 2             | Sincronización desde xlsx                                              | ✅ Completado |
-| 3             | Dashboard Core                                                         | ✅ Completado |
-| 4             | Dashboard Histórico y Detalle                                          | ✅ Completado |
-| 5             | Saldos Bancarios                                                       | ✅ Completado |
-| 6             | Proyección Anual                                                       | ✅ Completado |
-| Multi-usuario | Auth + RLS + aislamiento de datos                                      | ✅ Completado |
-| Ajuste        | Fix paginación, cache sidebar, invalidación quirúrgica                 | ✅ Completado |
-| 7             | Pivot Detalle, CSV Presupuestos, Otras Categorías                      | ✅ Completado |
-| 8             | Cartera v1 — upload xlsx Google Sheets + visualización                 | ✅ Completado |
-| 9             | Cartera v2 — precio en tiempo real vía yfinance                        | ✅ Completado |
-| 9.2           | Cartera v3 — multi-cartera + entrada manual de posiciones              | ✅ Completado |
-| 9.3           | Efectivo en Bróker — saldo editable por cartera                        | ✅ Completado |
-| 10.1          | Master Prompt Engine (MVP)                                             | ✅ Completado |
-| 10.2          | Refinamiento Master Prompt (feedback 2 iteraciones)                    | ✅ Completado |
-| 10.3          | Backlog mayor (deudas, patrimonio histórico, reorden)                  | ✅ Completado |
-| 11            | Tabla presupuesto estilo Excel (versión Streamlit 80%)                 | ✅ Completado |
-| 12            | Configurador de usuario (user_preferences + CATEGORIAS_OTROS dinámico) | 🔄 Diseñado  |
-| 13            | Fixes de cartera (FIFO/LIFO + cartera_snapshots)                       | 🔄 Diseñado  |
-| 14            | Capa de IA (alertas, proyección estadística, Gemini)                   | 🔄 Diseñado  |
-| 15            | Email automation (Make + FastAPI + Render)                             | 🔄 Diseñado  |
+| Sprint        | Nombre                                                                          | Estado       |
+| :------------ | :------------------------------------------------------------------------------ | :----------- |
+| 1             | Base de datos en la nube                                                        | ✅ Completado |
+| 2             | Sincronización desde xlsx                                                       | ✅ Completado |
+| 3             | Dashboard Core                                                                  | ✅ Completado |
+| 4             | Dashboard Histórico y Detalle                                                   | ✅ Completado |
+| 5             | Saldos Bancarios                                                                | ✅ Completado |
+| 6             | Proyección Anual                                                                | ✅ Completado |
+| Multi-usuario | Auth + RLS + aislamiento de datos                                               | ✅ Completado |
+| Ajuste        | Fix paginación, cache sidebar, invalidación quirúrgica                          | ✅ Completado |
+| 7             | Pivot Detalle, CSV Presupuestos, Otras Categorías                               | ✅ Completado |
+| 8             | Cartera v1 — upload xlsx Google Sheets + visualización                          | ✅ Completado |
+| 9             | Cartera v2 — precio en tiempo real vía yfinance                                 | ✅ Completado |
+| 9.2           | Cartera v3 — multi-cartera + entrada manual de posiciones                       | ✅ Completado |
+| 9.3           | Efectivo en Bróker — saldo editable por cartera                                 | ✅ Completado |
+| 10.1          | Master Prompt Engine (MVP)                                                      | ✅ Completado |
+| 10.2          | Refinamiento Master Prompt (feedback 2 iteraciones)                             | ✅ Completado |
+| 10.3          | Backlog mayor (deudas, patrimonio histórico, reorden)                           | ✅ Completado |
+| 10.4          | Refinamiento prompt — objetivos financieros, deuda ampliada, limpieza cartera   | 🔄 Diseñado  |
+| 11            | Tabla presupuesto estilo Excel (versión Streamlit 80%)                          | ✅ Completado |
+| 12            | Configurador de usuario (user_preferences + CATEGORIAS_OTROS dinámico)          | ✅ Completado |
+| 13            | Fixes de cartera (FIFO/LIFO + cartera_snapshots)                                | 🔄 Diseñado  |
+| 13.2          | Normalización BD pre-migración (user_profiles + objetivos_financieros + deudas) | 🔄 Diseñado  |
+| 14            | Capa de IA (alertas, proyección estadística, Gemini)                            | 🔄 Diseñado  |
+| 15            | Email automation (Make + FastAPI + Render)                                      | 🔄 Diseñado  |
 
 
 ---
 
 ## 11. Sprint activo y próximos sprints inmediatos
-### Sprint 12 — Configurador de usuario
+
+### Sprint 10.4 — Refinamiento prompt (objetivos financieros)
 🔄 Diseñado — pendiente de arrancar
-**Alcance:**
-- `user_preferences`: tabla Supabase (una fila por usuario, UPSERT). 
-  Campos: perfil_inversion, deuda_importe, deuda_cuota, deuda_fecha_fin, 
-  contexto_estrategico, pais, cuenta_personal, categorias_inversion.
-  Los inputs de pagina_prompt() se cargan desde esta tabla al entrar y se 
-  guardan con botón "💾 Guardar preferencias".
-- `CATEGORIAS_OTROS` dinámico: UI para que cada usuario gestione qué 
-  categorías se agrupan en "Otras Categorías", en lugar de lista hardcodeada.
+
+**Alcance** (4 cambios, alta relación impacto/esfuerzo):
+1. Nueva sección `OBJETIVOS` en el prompt: edad, horizonte de jubilación, objetivo principal, colchón deseado en meses. Campos nuevos en `user_preferences`.
+2. Eliminar columnas "Precio medio" y "Precio actual" de la tabla de posiciones en `generar_seccion_cartera()`.
+3. Añadir tipo de cambio EUR/USD explícito en Sección 2 del prompt.
+4. Ampliar campos de deuda: "¿tiene interés?" + "¿amortización anticipada posible?".
+
+**Origen:** feedback consolidado de 3ª iteración de testing (Gemini 2.5 Pro, Claude Sonnet 4.6, ChatGPT o3).
 ### Sprint 13 — Fixes de cartera
 🔄 Diseñado — pendiente de arrancar
 **Alcance:**
@@ -355,20 +385,30 @@ pagina_prompt(supabase, user_id)                      # UI página 🤖 Prompt I
 - `cartera_snapshots`: tabla para historial de valor de cartera a lo largo 
   del tiempo (valor de mercado vs coste por fecha)
 
+### Sprint 13.2 - Normalización BD pre-migración
+🔄 Diseñado — pendiente de arrancar
+**Alcance del Sprint 13b:**
+
+- Crear `user_profiles`, `objetivos_financieros`, `deudas` en Supabase
+- Migrar datos de `user_preferences` a las nuevas tablas
+- Deprecar `user_preferences`
+- Actualizar `get_user_preferences()` / `save_user_preferences()` para leer de las 3 tablas nuevas
+- El prompt engine no cambia — solo cambia de dónde vienen los datos
+
+
 ---
 
 ## 12. Pins activos / alertas
 
 
 | Pin                               | Detalle                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ℹ️ keep-alive.yml                 | Hace ping HTTP simple a la URL pública de Supabase. Si Supabase exige query autenticada para evitar pausa, actualizar.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ℹ️ Cache TTL 300s                 | `get_todos_gastos`, `get_balance_app` y `get_saldos_actuales` cachean 5 minutos. Se invalidan quirúrgicamente tras sync y tras guardar saldos.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ℹ️ CATEGORIAS_OTROS               | Lista hardcodeada en `app.py`. Mover a configurador de usuario en sprint futuro.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ℹ️ CSV presupuestos               | Creación de CSV requiere Terminal en Mac. Pendiente: generación de plantilla desde la app en sprint futuro (Configurador).                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ℹ️ yfinance                       | scraping de Yahoo Finance, sin garantía de disponibilidad. Fallback automático a precio del xlsx. Conversión multi-bolsa vía `PREFIJO_A_SUFIJO_YF` (Sprint 9.2): `LON:→.L`, `GER:→.DE`, `PAR:→.PA`, `AMS:→.AS`, `MIL:→.MI`, `MAD:→.MC`, `SIX:→.SW`, `TYO:→.T`, `HKG:→.HK`, `TOR:→.TO`. Casos legacy: `BRK.B→BRK-B`, ETFs Londres sin prefijo (`GLDV`, `CSPX`, `IGLN`) → `XXX.L`                                                                                                                                                                                                                          |
 | 💡 Tabla presupuesto estilo Excel | Idea propuesta por David: tabla con categorías en filas (2 sub-filas Gasto/Presupuesto), meses en columnas, colores G/P automáticos — réplica de su Excel manual. Versión "80%" viable en Streamlit con pandas Styler (sin sticky headers/columns ni bandas de color por categoría). Nota: Candidata a Sprint 11. Nota: Para usuarios sin presupuesto (ej. Alicia): se omite la fila "Presupuesto" y la fila "Gasto" se muestra sin color condicional (mismo patrón que generar_tabla_anual()). Nota: La versión completa cuando pase a Vercel/Reflex (sticky, edición inline + autoguardado a Supabase) |
-
+| ℹ️ user_preferences               | Tabla creada en Sprint 12. Sprint 10.4 añadirá campos: edad, horizonte_jubilacion, objetivo_principal, colchon_objetivo_meses, deuda_interes, deuda_amortizacion_anticipada. Actualizar tabla en Supabase antes de codificar.                                                                                                                                                                                                                                                                                                                                                                            |
 
 ---
 
@@ -648,3 +688,16 @@ Nueva página "🤖 Prompt IA" que agrega automáticamente la situación financi
 
 - 3 filas en blanco encima de los totales al pie — comportamiento del MultiIndex en Streamlit, no crítico, diferido a migración Reflex.
 
+### Sprint 12 — Configurador de usuario (21 Jun 2026)
+
+**Implementado:**
+- Nueva tabla `user_preferences` en Supabase (una fila por usuario, UPSERT, RLS).
+- `CATEGORIAS_OTROS` deja de ser constante hardcodeada — cada usuario configura las suyas. Usuario nuevo parte de lista vacía (no hay fallback a la lista de David).
+- `get_user_preferences()` / `save_user_preferences()` — funciones de lectura/escritura con invalidación quirúrgica de cache.
+- `pagina_configuracion()`: nueva página ⚙️ Configuración con dos secciones — preferencias del Prompt IA y gestión de Otras Categorías.
+- `pagina_prompt()` actualizado para cargar preferencias guardadas al entrar y guardarlas bidireccional con ⚙️ Configuración.
+- `CATEGORIAS_OTROS_DEFAULT = []` reemplaza la constante con valores hardcodeados.
+- `main()` carga preferencias una vez por sesión y las inyecta en `st.session_state.categorias_otros`.
+
+**Dead code pendiente de eliminar:**
+- `calcular_stats_gastos_6m()` — función sin uso desde Sprint 10.1. Eliminar en próximo sprint de limpieza.
